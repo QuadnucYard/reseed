@@ -1,0 +1,5 @@
+# Comments and blank lines are ignored.
+
+brew "git"
+cask "visual-studio-code" # user-facing editor
+tap "homebrew/cask"

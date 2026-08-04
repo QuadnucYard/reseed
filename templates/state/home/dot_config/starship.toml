@@ -1,0 +1,3 @@
+"$schema" = "https://starship.rs/config-schema.json"
+
+# Shared prompt configuration for every enabled shell goes here.

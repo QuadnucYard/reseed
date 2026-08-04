@@ -1,0 +1,29 @@
+[tools]
+# Portable tools belong here. "latest" is the default policy; use an exact
+# version only when reproducibility requires it.
+rust = ["stable", "nightly"]
+starship = "latest"
+# node = "latest"
+# python = "latest"
+# "cargo:ripgrep" = "latest"
+# "npm:pnpm" = "latest"
+# "npm:@biomejs/biome" = "latest"
+# "pipx:ruff" = "latest"
+
+[tasks."reseed:restore"]
+description = "Optional project-specific restore hook"
+run = "echo 'No project-specific restore task configured'"
+
+[tasks."reseed:shells"]
+description = "Generate cross-platform shell integration after tools are installed"
+run = "nu --no-config-file scripts/configure-shells.nu"
+
+# Direct-manager exceptions can remain durable without another manifest format.
+# Add the required runtime above, define an idempotent task here, then list the
+# task under software.mise.restore_tasks in config/recovery.nuon or a profile.
+# [tasks."restore:pnpm-exceptions"]
+# run = "pnpm add --global some-package@latest"
+# [tasks."restore:bun-exceptions"]
+# run = "bun add --global some-package@latest"
+# [tasks."restore:uv-exceptions"]
+# run = "uv tool install --upgrade some-package"

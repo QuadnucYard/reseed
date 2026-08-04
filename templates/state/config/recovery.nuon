@@ -1,0 +1,46 @@
+{
+  schema: 1
+  default_profiles: [personal]
+  state_dir: "~/.local/state/reseed"
+  git: {
+    branch: main
+    remote: origin
+  }
+  chezmoi: {
+    enabled: true
+    apply_args: []
+  }
+  software: {
+    winget: {
+      enabled: true
+      manifests: [packages/windows/winget.json]
+      export_on_backup: false
+      update: true
+    }
+    homebrew: {
+      enabled: true
+      manifests: [packages/macos/Brewfile]
+      export_on_backup: false
+      update: true
+    }
+    mise: {
+      enabled: true
+      configs: [mise.toml]
+      task_files: [scripts/configure-shells.nu]
+      update: true
+      restore_tasks: [reseed:shells]
+    }
+  }
+  kopia: {
+    enabled: false
+    snapshot_paths: []
+    restore: []
+  }
+  observations: {
+    tool_managers: [cargo pnpm bun uv npm yarn]
+  }
+  bundle: {
+    paths: []
+    include_tools: [chezmoi nu mise]
+  }
+}

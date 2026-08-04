@@ -1,0 +1,4 @@
+{
+  # This profile intentionally inherits the complete shared configuration.
+  # Add role-specific manifests, mise configs, or Kopia paths here.
+}

@@ -1,0 +1,20 @@
+{
+  software: {
+    winget: {
+      manifests: [
+        packages/windows/winget.json
+        packages/windows/winget-work.json
+      ]
+    }
+    homebrew: {
+      manifests: [
+        packages/macos/Brewfile
+        packages/macos/Brewfile.work
+      ]
+    }
+    mise: {
+      configs: [mise.toml mise.work.toml]
+      restore_tasks: [reseed:work]
+    }
+  }
+}
