@@ -1,0 +1,9 @@
+.env
+.env.*
+!.env.example
+.DS_Store
+*.tmp
+*.log
+
+.reseed-local/
+/reseed-source*.tar.gz
