@@ -1,0 +1,6 @@
+{
+  schema: 1
+  packages: [
+    {spec: "ruff" commands: [ruff]}
+  ]
+}

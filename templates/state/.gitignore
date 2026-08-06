@@ -5,3 +5,6 @@ reseed-source*.tar.gz
 .DS_Store
 *.tmp
 *.log
+bin/
+shell/
+install/

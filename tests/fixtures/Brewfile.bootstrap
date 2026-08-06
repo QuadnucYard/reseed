@@ -1,0 +1,3 @@
+brew "git"
+brew "fish"
+brew "mise" # engine-owned

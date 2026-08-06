@@ -1,28 +1,50 @@
+# Orchestration layer composing the lib modules and integrations into the
+# reseed workflows: init, plan, status, restore, backup, update, reconcile,
+# verify, and bundle.
+
 use core.nu [confirm detect-os fail info warning]
 use config.nu [config-fingerprint load-config validate-config]
 use state.nu [complete-stage fail-stage load-checkpoint stage-done]
 use git.nu [git-bundle git-commit git-init git-pull git-status]
 use ../integrations/chezmoi.nu [chezmoi-backup chezmoi-restore chezmoi-status chezmoi-verify]
+use ../integrations/bootstrap.nu [bootstrap-status bootstrap-verify]
 use ../integrations/homebrew.nu [homebrew-backup homebrew-reconcile homebrew-restore homebrew-status homebrew-update homebrew-verify]
 use ../integrations/kopia.nu [kopia-backup kopia-restore kopia-status kopia-verify]
 use ../integrations/mise.nu [mise-reconcile mise-restore mise-status mise-update mise-verify]
 use ../integrations/tooling.nu [tooling-backup tooling-observe]
 use ../integrations/winget.nu [winget-backup winget-reconcile winget-restore winget-status winget-update winget-verify]
 
-export def workflow-verification-tools [--skip-software]: nothing -> list<string> {
+# Names of the tools verified in the final restore stage. --skip-software
+# excludes the native package managers and mise; the bootstrap contract,
+# chezmoi, and kopia are always verified.
+export def workflow-verification-tools [
+  --skip-software # Exclude native packages and mise-managed tools.
+]: nothing -> list<string> {
   let software = if $skip_software { [] } else { [winget homebrew mise] }
-  $software | append [chezmoi kopia]
+  [bootstrap] | append $software | append [chezmoi kopia]
 }
 
-def state-template [engine_root: path]: nothing -> path {
+# Directory of the generic state template shipped with the engine.
+def state-template [
+  engine_root: path # Engine directory.
+]: nothing -> path {
   $engine_root | path join "templates" "state"
 }
 
-def state-sentinel [state_root: path]: nothing -> path {
+# Sentinel file marking a directory as initialized private state.
+def state-sentinel [
+  state_root: path # Private state root.
+]: nothing -> path {
   $state_root | path join ".reseed-state"
 }
 
-def ensure-state-root [engine_root: path state_root: path --dry-run] {
+# Seed the private state root from the engine template. Refuses a nonempty
+# directory without the sentinel, and never re-seeds an initialized root.
+def ensure-state-root [
+  engine_root: path # Engine directory providing the template.
+  state_root: path # Private state root to seed.
+  --dry-run # Report the seeding without copying.
+] {
   let template = (state-template $engine_root)
   if not ($template | path exists) { fail $"State template is missing: ($template)" }
   if ($state_root | path exists) {
@@ -43,7 +65,14 @@ def ensure-state-root [engine_root: path state_root: path --dry-run] {
   }
 }
 
-export def workflow-init [engine_root: path state_root: path profiles: list<string> --remote-url: string --dry-run] {
+# Create or validate the private state repository and initialize Git.
+export def workflow-init [
+  engine_root: path # Engine directory.
+  state_root: path # Private state root.
+  profiles: list<string> # Profile names to validate against.
+  --remote-url: string # Private Git remote URL to configure as origin.
+  --dry-run # Show what would be initialized without writing files.
+] {
   ensure-state-root $engine_root $state_root --dry-run=$dry_run
   let config_root = if ((state-sentinel $state_root) | path exists) { $state_root } else { state-template $engine_root }
   let config = (load-config $config_root $profiles)
@@ -52,7 +81,13 @@ export def workflow-init [engine_root: path state_root: path profiles: list<stri
   info $"Private Reseed state: ($state_root)"
 }
 
-export def workflow-plan [root: path config: record --skip-software]: nothing -> list<record> {
+# Ordered recovery stages with their owners and whether each is enabled for
+# the current platform and configuration.
+export def workflow-plan [
+  root: path # Private state root.
+  config: record # Loaded configuration.
+  --skip-software # Exclude native packages and mise-managed tools.
+]: nothing -> list<record> {
   let os = (detect-os)
   let winget = (winget-status $root $config)
   let brew = (homebrew-status $root $config)
@@ -68,12 +103,18 @@ export def workflow-plan [root: path config: record --skip-software]: nothing ->
   ]
 }
 
-export def workflow-status [root: path config: record] {
+# Report integration availability, private repository state, and desired-state
+# file health as tables.
+export def workflow-status [
+  root: path # Private state root.
+  config: record # Loaded configuration.
+] {
   info $"platform: (detect-os)"
   info $"private state: ($root)"
   info $"profiles: ($config.active_profiles | str join ', ')"
   let git = (git-status $root)
   [
+    ({tool: bootstrap enabled: true applicable: true available: ((bootstrap-status | where available == false | is-empty)) desired: (bootstrap-status | each {|item| {command: $item.command available: $item.available} })})
     (chezmoi-status $root $config)
     (winget-status $root $config)
     (homebrew-status $root $config)
@@ -86,7 +127,11 @@ export def workflow-status [root: path config: record] {
   if ($issues | is-empty) { info "desired-state files are present" } else { $issues | table | print }
 }
 
-def check-config [root: path config: record] {
+# Fail when the configuration has any validation error-level issue.
+def check-config [
+  root: path # Private state root.
+  config: record # Loaded configuration.
+] {
   let issues = (validate-config $root $config)
   let errors = ($issues | where level == error)
   if ($errors | is-not-empty) {
@@ -95,12 +140,24 @@ def check-config [root: path config: record] {
   }
 }
 
+# Fail when a bootstrap-contract executable is missing for this recovery mode.
+def check-bootstrap [
+  --skip-software # Skip checks for mise (software-only tool).
+] {
+  let failures = (bootstrap-verify --skip-software=$skip_software | where {|item| not $item.ok })
+  if ($failures | is-not-empty) {
+    fail $"Bootstrap prerequisites are missing: (($failures | get check) | str join ', ')"
+  }
+}
+
+# Run one restore stage against the checkpoint: skip it when already complete
+# (--resume), record failures, and mark it complete on success.
 def execute-stage [
-  config: record
-  checkpoint: record
-  stage: string
-  action: closure
-  --dry-run
+  config: record # Loaded configuration.
+  checkpoint: record # Current checkpoint.
+  stage: string # Stage name.
+  action: closure # Stage work to run.
+  --dry-run # Do not persist checkpoint changes.
 ]: nothing -> record {
   if (stage-done $checkpoint $stage) {
     info $"resume: skipping completed stage '($stage)'"
@@ -120,11 +177,22 @@ def execute-stage [
   complete-stage $config $checkpoint $stage --dry-run=$dry_run
 }
 
-export def workflow-restore [engine_root: path root: path config: record --yes --resume --dry-run --skip-software] {
+# Restore the machine: native packages, mise tools, configuration, snapshots,
+# and verification, in dependency order with checkpoint resume support.
+export def workflow-restore [
+  engine_root: path # Engine directory (checkpoint fingerprint scope).
+  root: path # Private state root.
+  config: record # Loaded configuration.
+  --yes # Apply the recovery plan without asking for confirmation.
+  --resume # Continue a matching interrupted restore.
+  --dry-run # Show recovery actions without changing the machine.
+  --skip-software # Skip native packages and mise-managed tools.
+] {
+  check-bootstrap --skip-software=$skip_software
   check-config $root $config
   let plan = (workflow-plan $root $config --skip-software=$skip_software)
   $plan | table | print
-  if not (confirm "Apply this recovery plan?" --yes=$yes) { info "Restore cancelled"; return }
+  if not $dry_run and not (confirm "Apply this recovery plan?" --yes=$yes) { info "Restore cancelled"; return }
 
   mut checkpoint = (load-checkpoint $root $config (config-fingerprint $root $config --engine-root=$engine_root) --resume=$resume)
   let os = (detect-os)
@@ -156,13 +224,15 @@ export def workflow-restore [engine_root: path root: path config: record --yes -
   info "Restore completed"
 }
 
+# Capture managed dotfiles, software observations, and configured snapshots,
+# optionally committing and pushing the private state repository.
 export def workflow-backup [
-  root: path
-  config: record
-  --refresh-manifests
-  --commit
-  --push
-  --dry-run
+  root: path # Private state root.
+  config: record # Loaded configuration.
+  --refresh-manifests # Replace desired native manifests with the full export.
+  --commit # Commit captured changes to the private state repository.
+  --push # Push the new backup commit; requires --commit.
+  --dry-run # Show capture, snapshot, and Git actions without writing anything.
 ] {
   check-config $root $config
   if $push and not $commit { fail "--push requires --commit" }
@@ -172,15 +242,25 @@ export def workflow-backup [
   chezmoi-backup $root $config --dry-run=$dry_run
   winget-backup $root $config --refresh-manifests=$refresh_manifests --dry-run=$dry_run
   homebrew-backup $root $config --refresh-manifests=$refresh_manifests --dry-run=$dry_run
-  tooling-backup $config --dry-run=$dry_run
+  tooling-backup $root $config --dry-run=$dry_run
   kopia-backup $config --dry-run=$dry_run
   if $commit { git-commit $root $config $"Backup (date now | format date '%Y-%m-%d')" --push=$push --dry-run=$dry_run }
   info "Backup capture completed; review the source diff"
 }
 
-export def workflow-update [root: path config: record profiles: list<string> --yes --dry-run] {
+# Pull the private state, update managed software, reapply dotfiles, and
+# verify the result. The configuration is reloaded after the pull so updates
+# honor the freshly pulled desired state.
+export def workflow-update [
+  root: path # Private state root.
+  config: record # Loaded configuration (pre-pull).
+  profiles: list<string> # Profile names to reload after the pull.
+  --yes # Update without asking for confirmation.
+  --dry-run # Show pull and update actions without changing anything.
+] {
+  check-bootstrap
   check-config $root $config
-  if not (confirm "Pull configuration and update managed software?" --yes=$yes) { info "Update cancelled"; return }
+  if not $dry_run and not (confirm "Pull configuration and update managed software?" --yes=$yes) { info "Update cancelled"; return }
   git-pull $root $config --dry-run=$dry_run
   let effective = if $dry_run { $config } else { load-config $root $profiles }
   check-config $root $effective
@@ -192,7 +272,13 @@ export def workflow-update [root: path config: record profiles: list<string> --y
   info "Managed update completed"
 }
 
-export def workflow-reconcile [root: path config: record --dry-run] {
+# Compare desired software with installed software, report-only. Reconcile
+# never changes desired state; it only writes fresh observations.
+export def workflow-reconcile [
+  root: path # Private state root.
+  config: record # Loaded configuration.
+  --dry-run # Avoid refreshing observations while producing the report.
+] {
   check-config $root $config
   let native = if (detect-os) == "windows" {
     winget-reconcile $root $config --dry-run=$dry_run
@@ -204,15 +290,21 @@ export def workflow-reconcile [root: path config: record --dry-run] {
   $native | table --expand | print
   let portable = (mise-reconcile $root $config --dry-run=$dry_run)
   if ($portable | is-not-empty) { $portable | table --expand | print }
-  let native_tools = (tooling-observe $config --dry-run=$dry_run)
+  let native_tools = (tooling-observe $root $config --dry-run=$dry_run)
   if ($native_tools | is-not-empty) { $native_tools | table --expand | print }
   info "Reconcile is report-only; desired state was not changed"
 }
 
-export def workflow-verify [root: path config: record --skip-software] {
+# Verify every enabled tool integration and fail when any check fails.
+export def workflow-verify [
+  root: path # Private state root.
+  config: record # Loaded configuration.
+  --skip-software # Verify dotfiles and snapshots without native packages or mise.
+] {
   mut results = []
   for tool in (workflow-verification-tools --skip-software=$skip_software) {
     let checked = match $tool {
+      bootstrap => (bootstrap-verify --skip-software=$skip_software)
       winget => (winget-verify $root $config)
       homebrew => (homebrew-verify $root $config)
       mise => (mise-verify $root $config)
@@ -224,11 +316,18 @@ export def workflow-verify [root: path config: record --skip-software] {
   if ($results | is-empty) { warning "No verification checks are enabled"; return }
   $results | table --expand | print
   let failures = ($results | where {|item| not $item.ok })
-  if ($failures | is-not-empty) { fail $"Verification failed: ($failures | length) check(s)" }
+  if ($failures | is-not-empty) { fail $"Verification failed: ($failures | length) checks" }
   info "Verification passed"
 }
 
-export def workflow-bundle [engine_root: path root: path config: record output: path --dry-run] {
+# Build an offline archive from committed engine and private-state snapshots.
+export def workflow-bundle [
+  engine_root: path # Engine directory.
+  root: path # Private state root.
+  config: record # Loaded configuration.
+  output: path # Destination archive path.
+  --dry-run # Show bundle contents without creating the archive.
+] {
   check-config $root $config
   git-bundle $engine_root $root $output $config --dry-run=$dry_run
 }

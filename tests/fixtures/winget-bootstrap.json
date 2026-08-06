@@ -1,0 +1,11 @@
+{
+  "Sources": [
+    {
+      "Packages": [
+        { "PackageIdentifier": "Git.Git" },
+        { "PackageIdentifier": "example.tool" },
+        { "PackageIdentifier": "jdx.mise" }
+      ]
+    }
+  ]
+}

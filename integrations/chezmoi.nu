@@ -1,6 +1,10 @@
-use ../lib/core.nu [command-exists run-command warning]
+use ../lib/prelude.nu *
 
-export def chezmoi-status [root: path config: record]: nothing -> record {
+# Availability and source for the chezmoi integration.
+export def chezmoi-status [
+  root: path # Private state root (the chezmoi source).
+  config: record # Loaded configuration.
+]: nothing -> record {
   {
     tool: chezmoi
     enabled: ($config.chezmoi.enabled? | default false)
@@ -10,7 +14,13 @@ export def chezmoi-status [root: path config: record]: nothing -> record {
   }
 }
 
-export def chezmoi-restore [root: path config: record --dry-run] {
+# Apply the chezmoi source. A diff runs first (failures tolerated) so the
+# pending changes are visible before apply modifies the home directory.
+export def chezmoi-restore [
+  root: path # Private state root (the chezmoi source).
+  config: record # Loaded configuration.
+  --dry-run # Show the apply without running it.
+] {
   let settings = $config.chezmoi
   if not ($settings.enabled? | default false) { return }
   if not (command-exists chezmoi) and not $dry_run { error make {msg: "chezmoi is required for the configuration stage"} }
@@ -19,13 +29,24 @@ export def chezmoi-restore [root: path config: record --dry-run] {
   run-command chezmoi (["--source" $source "apply"] | append ($settings.apply_args? | default [])) --dry-run=$dry_run | ignore
 }
 
-export def chezmoi-backup [root: path config: record --dry-run] {
+# Re-import changed home files back into the chezmoi source so they become
+# part of the private state.
+export def chezmoi-backup [
+  root: path # Private state root (the chezmoi source).
+  config: record # Loaded configuration.
+  --dry-run # Show the re-add without running it.
+] {
   if not ($config.chezmoi.enabled? | default false) { return }
   if not (command-exists chezmoi) { warning "chezmoi is unavailable; skipping configuration capture"; return }
   run-command chezmoi ["--source" ($root | into string) "re-add"] --dry-run=$dry_run | ignore
 }
 
-export def chezmoi-verify [root: path config: record]: nothing -> list<record> {
+# Verification checks for chezmoi: executable presence and that the target
+# state matches the source (an empty diff).
+export def chezmoi-verify [
+  root: path # Private state root (the chezmoi source).
+  config: record # Loaded configuration.
+]: nothing -> list<record> {
   if not ($config.chezmoi.enabled? | default false) { return [] }
   if not (command-exists chezmoi) {
     return [{check: "chezmoi executable" ok: false detail: "not found"}]

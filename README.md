@@ -41,28 +41,35 @@ The private repository contains all desired workstation state:
 ├── .chezmoiroot          points chezmoi at home/
 ├── config/               recovery policy and profile overlays
 ├── home/                 private chezmoi source files
-├── packages/             native manifests and cargo-binstall packages
+├── packages/             native and manager manifests
 ├── scripts/              private idempotent restore tasks
 └── mise.toml             shared runtimes and portable tools
 ```
 
 ## Tool ownership
 
-- chezmoi owns dotfiles and selected user configuration.
-- WinGet owns Windows applications.
-- Homebrew Bundle owns macOS applications.
-- mise owns portable runtimes and developer tools.
-- Kopia can optionally snapshot narrow opaque application state.
+Reseed has three software ownership layers:
 
-The starter state installs Git, chezmoi, Nushell, and mise on Windows. On
-macOS it also installs Fish. Mise then installs Rust stable, Rust nightly,
-Starship, and the configured Cargo-binstall bootstrap on both platforms.
-Native packages run before mise; Cargo-binstall packages, shell setup, and
-chezmoi run afterwards.
+- The engine bootstrap contract owns Git, chezmoi, Nushell, and mise. The
+  platform bootstrap scripts install these through WinGet or Homebrew, and
+  private native manifests must not list them.
+- Shared mise `[tools]` owns runtimes and portable tools that are common to
+  platforms. The shared configuration uses Node, explicit Aqua pnpm and uv,
+  Cargo-binstall, Starship, and the configured npm tool.
+- Manager manifests own packages whose installation semantics belong to a
+  package manager: Cargo binaries in `packages/cargo/binstall.nuon`, uv tools
+  in `packages/uv/tools.nuon`, and Node package-manager globals in the sibling
+  manifests under `packages/node/` for pnpm, Yarn, and Bun.
 
-Starship uses one private `~/.config/starship.toml` for every shell. Fish has a
-small `conf.d` adapter. The `reseed:shells` mise task generates Nushell's
-platform-specific Starship autoload file after Starship is installed.
+WinGet and Homebrew manifests contain only curated platform-specific software.
+Kopia can optionally snapshot narrow opaque application state. The restore
+order is bootstrap preflight, native packages, mise tools, manager manifests,
+shell adapters, chezmoi, snapshots, and verification.
+
+The shared manager binary directory is `~/.local/share/reseed/bin`. It is
+ignored by the private repository. The `reseed:shells` task generates Nushell
+and Fish automatic adapters plus PowerShell and POSIX profile snippets after
+the managed tools are installed.
 
 ## Daily commands
 
@@ -142,7 +149,10 @@ platform bootstrap executables and checksums. After extraction:
 ```
 
 Ignored and untracked files are excluded from both Git snapshots. Optional
-payloads come only from the private state's `bundle.paths`.
+payloads come only from the private state's `bundle.paths`. Offline recovery
+still requires the bootstrap contract's Git, chezmoi, and Nushell tools.
+Normal software recovery additionally requires mise; offline recovery uses
+`--skip-software`.
 
 ## Secrets
 
@@ -153,3 +163,14 @@ and password-manager integrations. Kopia repository credentials must remain
 external to both repositories.
 
 See [recovery](docs/recovery.md) for stage ordering and resume behavior.
+
+## Engine internals
+
+- [lib/README.md](lib/README.md) — the core library: configuration loading and
+  validation, Git operations, checkpoints, manager plumbing, and the workflow
+  orchestration layer.
+- [integrations/README.md](integrations/README.md) — the per-tool integration
+  contract (status/restore/update/reconcile/verify/backup) and how to add a new
+  integration.
+- [customizing](docs/customizing.md) and [backup inventory](docs/backup-inventory.md)
+  describe the private state format and daily capture behavior.

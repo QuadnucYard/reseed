@@ -1,5 +1,1 @@
-brew "git"
-brew "chezmoi"
-brew "nushell"
 brew "fish"
-brew "mise"

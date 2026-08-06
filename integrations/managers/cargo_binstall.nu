@@ -1,10 +1,18 @@
-use ../lib/core.nu [command-exists run-command warning]
+use ../../lib/prelude.nu *
 
-def settings [config: record]: nothing -> record {
-  $config.software.mise.cargo_binstall? | default {}
+# cargo-binstall settings from the configuration.
+def settings [
+  config: record # Loaded configuration.
+]: nothing -> record {
+  manager-settings $config cargo_binstall
 }
 
-export def cargo-binstall-packages [root: path config: record]: nothing -> list<string> {
+# Specifier strings for every configured Cargo crate, validated against the
+# binstall manifest schema.
+export def cargo-binstall-packages [
+  root: path # Private state root.
+  config: record # Loaded configuration.
+]: nothing -> list<string> {
   let configured = (settings $config)
   mut packages = []
   for relative in ($configured.manifests? | default []) {
@@ -25,45 +33,70 @@ export def cargo-binstall-packages [root: path config: record]: nothing -> list<
   $packages | uniq | sort
 }
 
-def binstall-args [packages: list<string> --update]: nothing -> list<string> {
+# cargo-binstall arguments; --force makes update reinstall over the existing
+# binaries instead of skipping them.
+def binstall-args [
+  packages: list<string> # Crates to install.
+  --update # Reinstall even when already installed.
+]: nothing -> list<string> {
   mut args = ["--no-confirm" "--disable-telemetry"]
   if $update { $args = ($args | append "--force") }
   $args | append $packages
 }
 
-def run-binstall [packages: list<string> --update --dry-run] {
-  if not $dry_run and not (command-exists cargo-binstall) {
-    error make {msg: "cargo-binstall is required for the configured Cargo packages; add cargo:cargo-binstall to mise.toml"}
-  }
-  run-command cargo-binstall (binstall-args $packages --update=$update) --dry-run=$dry_run | ignore
+# Run cargo-binstall through mise exec with the shared managed-tools
+# environment.
+def run-binstall [
+  root: path # Private state root.
+  config: record # Loaded configuration.
+  packages: list<string> # Crates to install.
+  --update # Reinstall over existing binaries.
+  --dry-run # Show the command without running it.
+] {
+  run-mise-managed $root $config "cargo-binstall" (binstall-args $packages --update=$update) "mise is required for the configured Cargo packages" --dry-run=$dry_run | ignore
 }
 
-export def cargo-binstall-restore [root: path config: record --dry-run] {
+# Install every configured Cargo crate.
+export def cargo-binstall-restore [
+  root: path # Private state root.
+  config: record # Loaded configuration.
+  --dry-run # Show the installs without running them.
+] {
   let configured = (settings $config)
   if not ($configured.enabled? | default false) { return }
   let packages = (cargo-binstall-packages $root $config)
   if ($packages | is-empty) { return }
-  run-binstall $packages --dry-run=$dry_run
+  run-binstall $root $config $packages --dry-run=$dry_run
 }
 
-export def cargo-binstall-update [root: path config: record --dry-run] {
+# Upgrade every configured Cargo crate.
+export def cargo-binstall-update [
+  root: path # Private state root.
+  config: record # Loaded configuration.
+  --dry-run # Show the upgrades without running them.
+] {
   let configured = (settings $config)
   if not ($configured.enabled? | default false) or not ($configured.update? | default true) { return }
   let packages = (cargo-binstall-packages $root $config)
   if ($packages | is-empty) { return }
-  if not $dry_run and not (command-exists cargo-binstall) {
-    warning "cargo-binstall is unavailable; skipping Cargo binary updates"
+  if not $dry_run and not (command-exists mise) {
+    warning "mise is unavailable; skipping Cargo binary updates"
     return
   }
-  run-binstall $packages --update --dry-run=$dry_run
+  run-binstall $root $config $packages --update --dry-run=$dry_run
 }
 
-def installed-cargo-packages []: nothing -> record {
-  if not (command-exists cargo) {
-    return {available: false packages: [] detail: "cargo is unavailable"}
+# Installed crate names from "cargo install --list" output, or
+# {available: false} with a reason when the inventory cannot be produced.
+def installed-cargo-packages [
+  root: path # Private state root.
+  config: record # Loaded configuration.
+]: nothing -> record {
+  if not (command-exists mise) {
+    return {available: false packages: [] detail: "mise is unavailable"}
   }
   let result = (try {
-    run-command cargo ["install" "--list"] --allow-failure
+    run-mise-managed $root $config "cargo" ["install" "--list"] "mise is required for the configured Cargo packages" --allow-failure
   } catch {|error|
     {
       exit_code: 127
@@ -86,7 +119,12 @@ def installed-cargo-packages []: nothing -> record {
   {available: true packages: $packages detail: "cargo install inventory"}
 }
 
-export def cargo-binstall-reconcile [root: path config: record --dry-run]: nothing -> record {
+# Compare desired crates with the installed inventory, report-only.
+export def cargo-binstall-reconcile [
+  root: path # Private state root.
+  config: record # Loaded configuration.
+  --dry-run # Skip the live inventory.
+]: nothing -> record {
   let configured = (settings $config)
   if not ($configured.enabled? | default false) {
     return {tool: cargo-binstall applicable: false desired_only: [] observed_only: []}
@@ -95,7 +133,7 @@ export def cargo-binstall-reconcile [root: path config: record --dry-run]: nothi
   if $dry_run {
     return {tool: cargo-binstall applicable: true desired_only: [] observed_only: [] detail: "dry run"}
   }
-  let installed = (installed-cargo-packages)
+  let installed = (installed-cargo-packages $root $config)
   if not $installed.available {
     return {tool: cargo-binstall applicable: true error: $installed.detail desired_only: $desired observed_only: []}
   }
@@ -107,16 +145,26 @@ export def cargo-binstall-reconcile [root: path config: record --dry-run]: nothi
   }
 }
 
-export def cargo-binstall-verify [root: path config: record]: nothing -> list<record> {
+# Verification checks for cargo-binstall: executable presence and that every
+# configured crate is installed.
+export def cargo-binstall-verify [
+  root: path # Private state root.
+  config: record # Loaded configuration.
+]: nothing -> list<record> {
   let configured = (settings $config)
   if not ($configured.enabled? | default false) { return [] }
   let packages = (cargo-binstall-packages $root $config)
+  let executable = (try {
+    run-mise-managed $root $config "cargo-binstall" ["--version"] "mise is required for the configured Cargo packages" --allow-failure
+  } catch {|error|
+    {exit_code: 127 stdout: "" stderr: ($error.msg? | default "failed to start mise")}
+  })
   mut results = [{
     check: "cargo-binstall executable"
-    ok: (command-exists cargo-binstall)
+    ok: ($executable.exit_code == 0)
     detail: "required for configured Cargo binaries"
   }]
-  let installed = (installed-cargo-packages)
+  let installed = (installed-cargo-packages $root $config)
   let missing = if $installed.available {
     $packages | where {|package| $package not-in $installed.packages}
   } else {

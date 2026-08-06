@@ -59,7 +59,10 @@ pnpm stores, Bun global `node_modules`, uv caches or downloaded interpreters,
 Homebrew Cellar/cache, WinGet caches, drivers, registry hives, DPAPI blobs, or
 project build outputs.
 
-Generate completions and Nushell vendor autoload files from managed tools.
+Do not back up `~/.local/share/reseed/bin/` or its generated shell adapters;
+these are recreated from `UV_TOOL_BIN_DIR`, `PNPM_HOME`, and the
+`reseed:shells` task. Generate completions and Nushell vendor autoload files
+from managed tools.
 Use native browser/editor sync for data already owned there. Use Kopia only for
 narrow, valuable application databases that cannot be represented
 declaratively, and define how the restore snapshot is selected before enabling

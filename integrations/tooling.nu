@@ -1,38 +1,52 @@
-use ../lib/core.nu [command-exists expand-home run-command warning]
-use ../lib/state.nu [observation-dir]
+use ../lib/prelude.nu *
 
-def migration-hint [manager: string]: nothing -> string {
+# Migration hint shown when an observation manager cannot be captured, so the
+# user knows where to move the inventory entries.
+def migration-hint [
+  manager: string # Manager name.
+]: nothing -> string {
   match $manager {
-    cargo => 'Move portable crates to mise.toml as "cargo:<crate>" = "latest".'
-    pnpm | npm | yarn | bun => 'Move portable JavaScript CLIs to mise.toml as "npm:<package>" = "latest".'
-    uv => 'Move portable Python CLIs to mise.toml through the pipx backend when compatible.'
+    cargo => 'Move portable crates to the configured packages/cargo/binstall.nuon manifest.'
+    pnpm => 'Move global JavaScript CLIs to packages/node/pnpm/global.nuon.'
+    yarn => 'Move global JavaScript CLIs to packages/node/yarn/global.nuon.'
+    bun => 'Move global JavaScript CLIs to packages/node/bun/global.nuon.'
+    npm => 'Move portable JavaScript CLIs to mise.toml or a supported Node manager manifest.'
+    uv => 'Move Python CLI tools to the configured packages/uv manifest.'
     _ => "Review this native inventory and keep only tools that cannot be owned by mise."
   }
 }
 
+# Run a manager's inventory command and save its stdout to the observations
+# directory. When the manager is owned by mise, the command runs through
+# "mise exec" so it sees the same environment as installed tools.
 def observe-command [
-  config: record
-  manager: string
-  program: string
-  args: list<string>
-  filename: string
-  --dry-run
+  config: record # Loaded configuration.
+  manager: string # Manager name for the report.
+  program: string # Executable to run.
+  args: list<string> # Inventory arguments.
+  filename: string # Observation file name.
+  --mise-config: path = "" # Mise config; non-empty runs through mise exec.
+  --environment: record = {} # Extra environment for the child.
+  --dry-run # Report what would be captured without writing.
 ]: nothing -> record {
   let target = (observation-dir $config | path join $filename)
-  let available = (command-exists $program)
+  let managed = not (($mise_config | into string | str trim) | is-empty)
+  let actual_program = if $managed { "mise" } else { $program }
+  let actual_args = if $managed { mise-exec-args $mise_config $program $args } else { $args }
+  let available = (command-exists $actual_program)
   if not $available {
     return {
       manager: $manager
       available: false
       ok: false
       observation: ($target | into string)
-      detail: $"($program) is unavailable"
+      detail: $"($actual_program) is unavailable"
       migration: (migration-hint $manager)
     }
   }
 
   let result = (try {
-    run-command $program $args --allow-failure --dry-run=$dry_run
+    run-command $actual_program $actual_args --environment=$environment --allow-failure --dry-run=$dry_run
   } catch {|error|
     {
       exit_code: 127
@@ -55,88 +69,63 @@ def observe-command [
   }
 }
 
-def observe-bun [config: record --dry-run]: nothing -> record {
-  let install_root = ($env.BUN_INSTALL? | default (expand-home "~/.bun"))
-  let source = ($install_root | path join "install" "global" "package.json")
-  let target = (observation-dir $config | path join "bun-global-package.json")
-  let available = (command-exists bun)
-  if not $available {
-    return {
-      manager: bun
+# Run the configured inventory commands for one manager, returning its
+# observation records.
+def observe-manager [
+  config: record # Loaded configuration.
+  manager: string # Manager name.
+  mise_enabled: bool # Whether commands run through mise exec.
+  manager_config: path # Mise config to exec through when enabled.
+  --dry-run # Report what would be captured without writing.
+]: nothing -> list<record> {
+  let environment = if $mise_enabled { managed-tool-environment } else { {} }
+  let mise = if $mise_enabled { $manager_config } else { "" }
+  match $manager {
+    cargo => [(observe-command $config cargo cargo ["install" "--list"] "cargo-install.txt" --mise-config=$mise --environment=$environment --dry-run=$dry_run)]
+    pnpm => [(observe-command $config pnpm pnpm ["list" "-g" "--depth" "0" "--json"] "pnpm-global.json" --mise-config=$mise --environment=$environment --dry-run=$dry_run)]
+    bun => [(observe-command $config bun bun ["pm" "ls" "--global" "--json"] "bun-global-package.json" --mise-config=$mise --environment=$environment --dry-run=$dry_run)]
+    uv => [
+      (observe-command $config uv uv ["tool" "list" "--show-version-specifiers" "--show-with" "--show-extras" "--show-python"] "uv-tools.txt" --mise-config=$mise --environment=$environment --dry-run=$dry_run)
+      (observe-command $config uv uv ["python" "list" "--only-installed" "--output-format" "json"] "uv-python.json" --mise-config=$mise --environment=$environment --dry-run=$dry_run)
+    ]
+    npm => [(observe-command $config npm npm ["ls" "-g" "--depth" "0" "--json"] "npm-global.json" --mise-config=$mise --environment=$environment --dry-run=$dry_run)]
+    yarn => [(observe-command $config yarn yarn ["global" "list" "--json"] "yarn-global.jsonl" --mise-config=$mise --environment=$environment --dry-run=$dry_run)]
+    _ => [{
+      manager: $manager
       available: false
       ok: false
-      observation: ($target | into string)
-      detail: "bun is unavailable"
-      migration: (migration-hint bun)
-    }
-  }
-  if $dry_run {
-    return {
-      manager: bun
-      available: $available
-      ok: true
-      observation: ($target | into string)
-      detail: "would capture"
-      migration: (migration-hint bun)
-    }
-  }
-  if not ($source | path exists) {
-    return {
-      manager: bun
-      available: (command-exists bun)
-      ok: false
-      observation: ($target | into string)
-      detail: $"global package manifest not found: ($source)"
-      migration: (migration-hint bun)
-    }
-  }
-  let copied = (try {
-    mkdir ($target | path dirname)
-    cp $source $target
-    {ok: true detail: "captured"}
-  } catch {|error|
-    {ok: false detail: ($error.msg? | default ($error | to nuon))}
-  })
-  {
-    manager: bun
-    available: $available
-    ok: $copied.ok
-    observation: ($target | into string)
-    detail: $copied.detail
-    migration: (migration-hint bun)
+      observation: ""
+      detail: "unknown observation manager"
+      migration: "Remove it from observations.tool_managers or add an integration."
+    }]
   }
 }
 
-export def tooling-observe [config: record --dry-run]: nothing -> list<record> {
+# Capture inventory observations for every configured tool manager, running
+# them through mise when the portable-tools layer is enabled.
+export def tooling-observe [
+  root: path # Private state root.
+  config: record # Loaded configuration.
+  --dry-run # Report what would be captured without writing.
+]: nothing -> list<record> {
   let managers = ($config.observations.tool_managers? | default [])
+  let mise_enabled = ($config.software.mise.enabled? | default false)
+  let manager_config = if $mise_enabled { mise-manager-config $root $config } else { "" }
   mut results = []
   for manager in $managers {
-    let observed = match $manager {
-      cargo => [(observe-command $config cargo cargo ["install" "--list"] "cargo-install.txt" --dry-run=$dry_run)]
-      pnpm => [(observe-command $config pnpm pnpm ["list" "-g" "--depth" "0" "--json"] "pnpm-global.json" --dry-run=$dry_run)]
-      bun => [(observe-bun $config --dry-run=$dry_run)]
-      uv => [
-        (observe-command $config uv uv ["tool" "list" "--show-version-specifiers" "--show-with" "--show-extras" "--show-python"] "uv-tools.txt" --dry-run=$dry_run)
-        (observe-command $config uv uv ["python" "list" "--only-installed" "--output-format" "json"] "uv-python.json" --dry-run=$dry_run)
-      ]
-      npm => [(observe-command $config npm npm ["ls" "-g" "--depth" "0" "--json"] "npm-global.json" --dry-run=$dry_run)]
-      yarn => [(observe-command $config yarn yarn ["global" "list" "--json"] "yarn-global.jsonl" --dry-run=$dry_run)]
-      _ => [{
-        manager: $manager
-        available: false
-        ok: false
-        observation: ""
-        detail: "unknown observation manager"
-        migration: "Remove it from observations.tool_managers or add an integration."
-      }]
-    }
-    $results = ($results | append $observed)
+    $results = ($results | append (observe-manager $config $manager $mise_enabled $manager_config --dry-run=$dry_run))
   }
   $results
 }
 
-export def tooling-backup [config: record --dry-run] {
-  let results = (tooling-observe $config --dry-run=$dry_run)
+# Backup step that captures tool observations and warns about any manager
+# that could not be captured.
+export def tooling-backup [
+  root: path # Private state root.
+  config: record # Loaded configuration.
+  --dry-run # Show the captures without writing.
+] {
+  let results = (tooling-observe $root $config --dry-run=$dry_run)
   let failures = ($results | where {|item| not $item.ok })
   for failure in $failures {
     warning $"Tool observation incomplete for ($failure.manager): ($failure.detail)"

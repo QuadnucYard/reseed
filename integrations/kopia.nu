@@ -1,6 +1,9 @@
-use ../lib/core.nu [command-exists expand-home info run-command warning]
+use ../lib/prelude.nu *
 
-export def kopia-status [config: record]: nothing -> record {
+# Availability and configured snapshot/restore counts for kopia.
+export def kopia-status [
+  config: record # Loaded configuration.
+]: nothing -> record {
   {
     tool: kopia
     enabled: ($config.kopia.enabled? | default false)
@@ -11,7 +14,12 @@ export def kopia-status [config: record]: nothing -> record {
   }
 }
 
-export def kopia-backup [config: record --dry-run] {
+# Snapshot every configured source path that exists; missing paths are
+# reported as warnings rather than failures.
+export def kopia-backup [
+  config: record # Loaded configuration.
+  --dry-run # Show the snapshot commands without running them.
+] {
   if not ($config.kopia.enabled? | default false) { return }
   if not (command-exists kopia) { warning "Kopia is enabled but unavailable; skipping snapshots"; return }
   for item in ($config.kopia.snapshot_paths? | default []) {
@@ -24,7 +32,11 @@ export def kopia-backup [config: record --dry-run] {
   }
 }
 
-export def kopia-restore [config: record --dry-run] {
+# Restore every configured snapshot entry (snapshot ID to expanded target).
+export def kopia-restore [
+  config: record # Loaded configuration.
+  --dry-run # Show the restore commands without running them.
+] {
   if not ($config.kopia.enabled? | default false) { return }
   let restores = ($config.kopia.restore? | default [])
   if ($restores | is-empty) { return }
@@ -38,7 +50,11 @@ export def kopia-restore [config: record --dry-run] {
   }
 }
 
-export def kopia-verify [config: record]: nothing -> list<record> {
+# Verification checks for kopia: executable presence and that every
+# configured snapshot source exists.
+export def kopia-verify [
+  config: record # Loaded configuration.
+]: nothing -> list<record> {
   if not ($config.kopia.enabled? | default false) { return [] }
   mut results = [{check: "kopia executable" ok: (command-exists kopia) detail: "optional snapshot manager"}]
   for item in ($config.kopia.snapshot_paths? | default []) {

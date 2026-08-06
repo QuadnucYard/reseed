@@ -1,25 +1,46 @@
+# Shared utilities: platform detection, logging, command execution with
+# dry-run and failure capture, path and URL helpers, and confirmation.
+
+# Name of the current platform, normalized to lowercase ("windows", "macos",
+# or the raw OS name for anything else).
 export def detect-os []: nothing -> string {
   let name = ($nu.os-info.name | str downcase)
   if $name == "windows" { "windows" } else if $name == "macos" { "macos" } else { $name }
 }
 
-export def command-exists [name: string]: nothing -> bool {
+# True when the named executable is on PATH (external or built-in).
+export def command-exists [
+  name: string # Executable name to look up.
+]: nothing -> bool {
   (which $name | is-not-empty)
 }
 
-export def info [message: string] {
+# Print an informational message in the reseed banner style.
+export def info [
+  message: string # Message to print.
+] {
   print $"(ansi cyan_bold)reseed:(ansi reset) ($message)"
 }
 
-export def warning [message: string] {
+# Print a warning to stderr.
+export def warning [
+  message: string # Message to print.
+] {
   print --stderr $"(ansi yellow_bold)warning:(ansi reset) ($message)"
 }
 
-export def fail [message: string] {
+# Raise an error with the given message.
+export def fail [
+  message: string # Error message.
+] {
   error make {msg: $message}
 }
 
-export def expand-home [value: string]: nothing -> path {
+# Expand a leading ~ or ~/ or ~\ to the home directory; other values are
+# expanded without resolving symlinks.
+export def expand-home [
+  value: string # Path that may start with ~.
+]: nothing -> path {
   if $value == "~" {
     $nu.home-dir
   } else if ($value | str starts-with "~/") or ($value | str starts-with "~\\") {
@@ -29,25 +50,50 @@ export def expand-home [value: string]: nothing -> path {
   }
 }
 
-def printable-arg [value: string]: nothing -> string {
-  if ($value | str contains " ") or ($value | str contains "\t") {
-    $'"($value | str replace --all '"' '\\"')"'
+# Redact the userinfo of URLs so credentials never appear in logs or errors.
+# Matches "scheme://anything-without-/@-or-space@" and replaces the userinfo
+# (including a possible password) with ***.
+export def scrub-url [
+  value: string # URL that may contain credentials.
+]: nothing -> string {
+  $value | str replace --regex '(?i)([a-z][a-z0-9+.-]*://)[^/@\s]+@' '$1***@'
+}
+
+# Quote an argument for display when it contains spaces or tabs.
+def printable-arg [
+  value: string # Argument to display.
+]: nothing -> string {
+  let scrubbed = (scrub-url $value)
+  if ($scrubbed | str contains " ") or ($scrubbed | str contains "\t") {
+    $'"($scrubbed | str replace --all '"' '\\"')"'
   } else {
-    $value
+    $scrubbed
   }
 }
 
-export def show-command [program: string args: list<string> = []]: nothing -> string {
+# Render a program plus arguments as a single display string, quoting values
+# that contain whitespace and redacting URL credentials.
+export def show-command [
+  program: string # Program name.
+  args: list<string> = [] # Arguments.
+]: nothing -> string {
   ([(printable-arg $program)] | append ($args | each {|arg| printable-arg $arg }) | str join " ")
 }
 
+# Run an external program, returning {exit_code, stdout, stderr, skipped}.
+#
+# --dry-run prints the command without executing it. --allow-failure captures
+# failures (including a missing executable, reported as exit 127) into the
+# result record instead of failing. Any other nonzero exit aborts with a
+# redacted error message.
 export def run-command [
-  program: string
-  args: list<string> = []
-  --cwd: path
-  --dry-run
-  --allow-failure
-  --quiet
+  program: string # Program to run.
+  args: list<string> = [] # Arguments to pass.
+  --cwd: path # Working directory for the child process.
+  --environment: record = {} # Environment variables to set for the child.
+  --dry-run # Print the command without executing it.
+  --allow-failure # Return the result instead of failing on nonzero exit.
+  --quiet # Suppress the "running:" banner.
 ]: nothing -> record {
   let shown = (show-command $program $args)
   if $dry_run {
@@ -56,10 +102,27 @@ export def run-command [
   }
 
   if not $quiet { info $"running: ($shown)" }
-  let result = if $cwd == null {
+  let invoke = {| | if $cwd == null {
     run-external $program ...$args | complete
   } else {
     do { cd $cwd; run-external $program ...$args | complete }
+  }}
+  let result = if $allow_failure {
+    try {
+      if ($environment | is-empty) {
+        do $invoke
+      } else {
+        with-env $environment { do $invoke }
+      }
+    } catch {|error|
+      # A command that cannot be started (e.g. not on PATH) surfaces as an
+      # exception; normalize it to exit 127 like a shell would.
+      {exit_code: 127 stdout: "" stderr: ($error.msg? | default ($error | to nuon)) skipped: false}
+    }
+  } else if ($environment | is-empty) {
+    do $invoke
+  } else {
+    with-env $environment { do $invoke }
   }
 
   let normalized = ($result | upsert skipped false)
@@ -69,23 +132,33 @@ export def run-command [
     } else {
       $normalized.stderr | str trim
     }
-    fail $"Command failed (exit ($normalized.exit_code)): ($shown)\n($detail)"
+    fail $"Command failed (exit ($normalized.exit_code)): ($shown)\n(scrub-url $detail)"
   }
   $normalized
 }
 
-export def confirm [message: string --yes]: nothing -> bool {
+# Ask the user for y/N confirmation; --yes accepts without prompting.
+export def confirm [
+  message: string # Prompt text.
+  --yes # Accept without asking.
+]: nothing -> bool {
   if $yes { return true }
   let answer = (input $"($message) [y/N] " | str trim | str downcase)
   $answer in ["y" "yes"]
 }
 
-export def require-file [path: path label: string] {
+# Fail unless the file or directory at the given path exists.
+export def require-file [
+  path: path # Path that must exist.
+  label: string # Human-readable name used in the error.
+] {
   if not ($path | path exists) {
     fail $"Missing ($label): ($path)"
   }
 }
 
+# Current timestamp in ISO 8601 local time with offset, used for checkpoints
+# and observation filenames.
 export def now-string []: nothing -> string {
   date now | format date "%Y-%m-%dT%H:%M:%S%:z"
 }

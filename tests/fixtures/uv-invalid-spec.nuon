@@ -1,0 +1,6 @@
+{
+  schema: 1
+  packages: [
+    {spec: "ruff~=0.1" commands: [ruff]}
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  schema: 1
+  packages: [
+    "ruff==0.12.0"
+  ]
+}

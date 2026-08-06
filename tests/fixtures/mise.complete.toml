@@ -1,0 +1,7 @@
+[tools]
+node = "latest"
+rust = "stable"
+python = "latest"
+"npm:example-tool" = "latest"
+"cargo:example-tool" = "latest"
+"pipx:example-tool" = "latest"

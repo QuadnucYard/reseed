@@ -1,7 +1,11 @@
-use ../lib/core.nu [command-exists detect-os info run-command warning]
-use ../lib/state.nu [observation-dir]
+use ../lib/prelude.nu *
+use bootstrap.nu [bootstrap-winget-ids]
 
-export def winget-manifest-ids [path: path]: nothing -> list<string> {
+# Package identifiers extracted from a WinGet export file (JSON with a
+# Sources/Packages structure).
+export def winget-manifest-ids [
+  path: path # WinGet export file.
+]: nothing -> list<string> {
   if not ($path | path exists) { return [] }
   let manifest = (open $path)
   $manifest.Sources?
@@ -14,7 +18,19 @@ export def winget-manifest-ids [path: path]: nothing -> list<string> {
     | sort
 }
 
-export def winget-status [root: path config: record]: nothing -> record {
+# WinGet identifiers from a manifest, excluding the bootstrap-contract tools
+# the engine installs itself.
+export def native-winget-manifest-ids [
+  path: path # WinGet export file.
+]: nothing -> list<string> {
+  winget-manifest-ids $path | where {|id| $id not-in (bootstrap-winget-ids) }
+}
+
+# Availability and desired-manifest health for the WinGet integration.
+export def winget-status [
+  root: path # Private state root.
+  config: record # Loaded configuration.
+]: nothing -> record {
   let enabled = ($config.software.winget.enabled? | default false)
   let manifests = ($config.software.winget.manifests? | default [])
   {
@@ -26,7 +42,13 @@ export def winget-status [root: path config: record]: nothing -> record {
   }
 }
 
-export def winget-restore [root: path config: record --dry-run] {
+# Import every configured WinGet manifest, ignoring unavailable packages and
+# version mismatches so a partial import still completes.
+export def winget-restore [
+  root: path # Private state root.
+  config: record # Loaded configuration.
+  --dry-run # Show the imports without running them.
+] {
   let settings = $config.software.winget
   if not ($settings.enabled? | default false) or ((detect-os) != "windows") { return }
   if not (command-exists winget) and not $dry_run { error make {msg: "WinGet is required for the Windows package stage"} }
@@ -40,11 +62,18 @@ export def winget-restore [root: path config: record --dry-run] {
   }
 }
 
-export def winget-update [root: path config: record --dry-run] {
+# Upgrade every curated package in the configured manifests. A nonzero exit
+# is tolerated when WinGet reports nothing to upgrade or the package is
+# absent from the system.
+export def winget-update [
+  root: path # Private state root.
+  config: record # Loaded configuration.
+  --dry-run # Show the upgrades without running them.
+] {
   let settings = $config.software.winget
   if not ($settings.enabled? | default false) or not ($settings.update? | default true) or ((detect-os) != "windows") { return }
   if not (command-exists winget) and not $dry_run { warning "WinGet is unavailable; skipping Windows package updates"; return }
-  let ids = ($settings.manifests? | default [] | each {|manifest| winget-manifest-ids ($root | path join $manifest) } | flatten | uniq | sort)
+  let ids = ($settings.manifests? | default [] | each {|manifest| native-winget-manifest-ids ($root | path join $manifest) } | flatten | uniq | sort)
   for id in $ids {
     let result = (run-command winget [
       "upgrade" "--id" $id "--exact" "--accept-source-agreements"
@@ -56,7 +85,28 @@ export def winget-update [root: path config: record --dry-run] {
   }
 }
 
-def export-winget [path: path --dry-run]: nothing -> bool {
+# Remove the bootstrap-contract package identifiers from a WinGet export
+# file in place, keeping the curated manifest free of engine-owned tools.
+def filter-bootstrap-winget-ids [
+  path: path # WinGet export file to rewrite.
+] {
+  let ignored = (bootstrap-winget-ids)
+  let manifest = (open $path)
+  let sources = ($manifest.Sources? | default [] | each {|source|
+    let packages = ($source.Packages? | default [] | where {|package| ($package.PackageIdentifier? | default "") not-in $ignored })
+    $source | upsert Packages $packages
+  })
+  $manifest | upsert Sources $sources | to json --indent 2 | save --force $path
+}
+
+# Export the installed packages to a WinGet file, optionally filtering out
+# the bootstrap tools. Export failures degrade to a warning because WinGet
+# can exit nonzero even when the file is usable.
+def export-winget [
+  path: path # Destination export file.
+  --exclude-bootstrap # Filter engine-owned packages from the export.
+  --dry-run # Show the export without running it.
+]: nothing -> bool {
   if $dry_run {
     run-command winget ["export" "--output" ($path | into string) "--accept-source-agreements"] --dry-run | ignore
     return true
@@ -66,10 +116,21 @@ def export-winget [path: path --dry-run]: nothing -> bool {
   if $result.exit_code != 0 {
     warning $"WinGet export failed: ($result.stderr | str trim)"
     false
-  } else { true }
+  } else {
+    if $exclude_bootstrap { filter-bootstrap-winget-ids $path }
+    true
+  }
 }
 
-export def winget-backup [root: path config: record --refresh-manifests --dry-run] {
+# Capture the WinGet inventory. With --refresh-manifests the single configured
+# manifest is replaced by the live export; otherwise the export is written as
+# an observation under the disposable state directory.
+export def winget-backup [
+  root: path # Private state root.
+  config: record # Loaded configuration.
+  --refresh-manifests # Replace the curated manifest with the live export.
+  --dry-run # Show the export without running it.
+] {
   let settings = $config.software.winget
   if not ($settings.enabled? | default false) or ((detect-os) != "windows") or not (command-exists winget) { return }
   let refresh = $refresh_manifests or ($settings.export_on_backup? | default false)
@@ -84,11 +145,16 @@ export def winget-backup [root: path config: record --refresh-manifests --dry-ru
   } else {
     observation-dir $config | path join "winget.json"
   }
-  export-winget $target --dry-run=$dry_run | ignore
+  export-winget $target --exclude-bootstrap=$refresh --dry-run=$dry_run | ignore
   if not $refresh { info $"WinGet observation: ($target)" }
 }
 
-export def winget-reconcile [root: path config: record --dry-run]: nothing -> record {
+# Compare the curated manifests with a fresh export, report-only.
+export def winget-reconcile [
+  root: path # Private state root.
+  config: record # Loaded configuration.
+  --dry-run # Skip the live export.
+]: nothing -> record {
   let settings = $config.software.winget
   if not ($settings.enabled? | default false) or ((detect-os) != "windows") {
     return {tool: winget applicable: false desired_only: [] observed_only: []}
@@ -100,8 +166,8 @@ export def winget-reconcile [root: path config: record --dry-run]: nothing -> re
   if not (export-winget $observed --dry-run=$dry_run) or $dry_run {
     return {tool: winget applicable: true observation: $observed desired_only: [] observed_only: []}
   }
-  let desired_ids = ($settings.manifests? | default [] | each {|manifest| winget-manifest-ids ($root | path join $manifest) } | flatten | uniq | sort)
-  let observed_ids = (winget-manifest-ids $observed)
+  let desired_ids = ($settings.manifests? | default [] | each {|manifest| native-winget-manifest-ids ($root | path join $manifest) } | flatten | uniq | sort)
+  let observed_ids = (native-winget-manifest-ids $observed)
   {
     tool: winget
     applicable: true
@@ -111,14 +177,19 @@ export def winget-reconcile [root: path config: record --dry-run]: nothing -> re
   }
 }
 
-export def winget-verify [root: path config: record]: nothing -> list<record> {
+# Verification checks for WinGet: executable presence, manifest health, and
+# that every curated package is installed.
+export def winget-verify [
+  root: path # Private state root.
+  config: record # Loaded configuration.
+]: nothing -> list<record> {
   let settings = $config.software.winget
   if not ($settings.enabled? | default false) or ((detect-os) != "windows") { return [] }
   mut results = [{check: "winget executable" ok: (command-exists winget) detail: "required on Windows"}]
   for manifest in ($settings.manifests? | default []) {
     let path = ($root | path join $manifest)
-    let ids = (winget-manifest-ids $path)
-    $results = ($results | append {check: $"winget manifest: ($manifest)" ok: (($path | path exists) and ($ids | is-not-empty)) detail: $"($ids | length) package IDs"})
+    let ids = (native-winget-manifest-ids $path)
+    $results = ($results | append {check: $"winget manifest: ($manifest)" ok: ($path | path exists) detail: $"($ids | length) curated package IDs"})
     if (command-exists winget) {
       for id in $ids {
         let installed = (try {

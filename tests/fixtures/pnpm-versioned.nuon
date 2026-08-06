@@ -1,0 +1,6 @@
+{
+  schema: 1
+  packages: [
+    "@biomejs/biome@2.1.0"
+  ]
+}

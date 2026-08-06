@@ -26,10 +26,31 @@
     mise: {
       enabled: true
       configs: [mise.toml]
+      manager_config: mise.toml
       task_files: [scripts/configure-shells.nu]
       cargo_binstall: {
         enabled: false
         manifests: [packages/cargo/binstall.nuon]
+        update: true
+      }
+      uv: {
+        enabled: true
+        manifests: [packages/uv/tools.nuon]
+        update: true
+      }
+      pnpm: {
+        enabled: true
+        manifests: [packages/node/pnpm/global.nuon]
+        update: true
+      }
+      yarn: {
+        enabled: false
+        manifests: [packages/node/yarn/global.nuon]
+        update: true
+      }
+      bun: {
+        enabled: false
+        manifests: [packages/node/bun/global.nuon]
         update: true
       }
       update: true
@@ -46,6 +67,6 @@
   }
   bundle: {
     paths: []
-    include_tools: [chezmoi nu mise]
+    include_tools: [git chezmoi nu mise]
   }
 }

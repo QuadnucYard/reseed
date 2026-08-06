@@ -1,7 +1,11 @@
-use ../lib/core.nu [command-exists detect-os info run-command warning]
-use ../lib/state.nu [observation-dir]
+use ../lib/prelude.nu *
+use bootstrap.nu [bootstrap-brew-items]
 
-export def brewfile-items [path: path]: nothing -> list<string> {
+# Declared entries of a Brewfile (brew/cask/tap/mas/vscode lines), with
+# trailing comments stripped.
+export def brewfile-items [
+  path: path # Brewfile path.
+]: nothing -> list<string> {
   if not ($path | path exists) { return [] }
   open --raw $path
     | lines
@@ -12,7 +16,19 @@ export def brewfile-items [path: path]: nothing -> list<string> {
     | sort
 }
 
-export def homebrew-status [root: path config: record]: nothing -> record {
+# Brewfile entries excluding the bootstrap-contract tools the engine installs
+# itself.
+export def native-brewfile-items [
+  path: path # Brewfile path.
+]: nothing -> list<string> {
+  brewfile-items $path | where {|item| $item not-in (bootstrap-brew-items) }
+}
+
+# Availability and desired-manifest health for the Homebrew integration.
+export def homebrew-status [
+  root: path # Private state root.
+  config: record # Loaded configuration.
+]: nothing -> record {
   let settings = $config.software.homebrew
   let manifests = ($settings.manifests? | default [])
   {
@@ -24,7 +40,12 @@ export def homebrew-status [root: path config: record]: nothing -> record {
   }
 }
 
-export def homebrew-restore [root: path config: record --dry-run] {
+# Install every configured Brewfile.
+export def homebrew-restore [
+  root: path # Private state root.
+  config: record # Loaded configuration.
+  --dry-run # Show the installs without running them.
+] {
   let settings = $config.software.homebrew
   if not ($settings.enabled? | default false) or ((detect-os) != "macos") { return }
   if not (command-exists brew) and not $dry_run { error make {msg: "Homebrew is required for the macOS package stage"} }
@@ -34,7 +55,13 @@ export def homebrew-restore [root: path config: record --dry-run] {
   }
 }
 
-export def homebrew-update [root: path config: record --dry-run] {
+# Update Homebrew and upgrade only the packages each Brewfile declares,
+# excluding the bootstrap-contract tools.
+export def homebrew-update [
+  root: path # Private state root.
+  config: record # Loaded configuration.
+  --dry-run # Show the updates without running them.
+] {
   let settings = $config.software.homebrew
   if not ($settings.enabled? | default false) or not ($settings.update? | default true) or ((detect-os) != "macos") { return }
   if not (command-exists brew) { warning "Homebrew is unavailable; skipping macOS package updates"; return }
@@ -43,30 +70,80 @@ export def homebrew-update [root: path config: record --dry-run] {
     let path = ($root | path join $manifest)
     run-command brew ["bundle" "install" $"--file=($path)"] --dry-run=$dry_run | ignore
     for kind in [brews casks] {
-      let listed = (run-command brew ["bundle" "list" $"--file=($path)" $"--($kind)"] --allow-failure --dry-run=$dry_run)
-      if ($listed.exit_code == 0) and not $dry_run {
-        let names = ($listed.stdout | lines | each {|line| $line | str trim } | compact)
-        if ($names | is-not-empty) {
-          let args = if $kind == "casks" { ["upgrade" "--cask"] | append $names } else { ["upgrade"] | append $names }
-          let upgraded = (run-command brew $args --allow-failure)
-          if $upgraded.exit_code != 0 { warning $"Some Homebrew ($kind) updates failed: ($upgraded.stderr | str trim)" }
-        }
-      }
+      upgrade-brewfile-kind $path $kind --dry-run=$dry_run
     }
   }
 }
 
-def export-brewfile [path: path --dry-run]: nothing -> bool {
+# Upgrade one kind of package (brews or casks) declared in a Brewfile,
+# skipping anything the bootstrap contract owns.
+def upgrade-brewfile-kind [
+  path: path # Brewfile path.
+  kind: string # "brews" or "casks".
+  --dry-run # Show the upgrades without running them.
+] {
+  let listed = (run-command brew ["bundle" "list" $"--file=($path)" $"--($kind)"] --allow-failure --dry-run=$dry_run)
+  if ($listed.exit_code != 0) or $dry_run { return }
+  let names = ($listed.stdout | lines | each {|line| $line | str trim } | compact)
+  let ignored_names = (bootstrap-brew-items
+    | parse --regex '^(?:brew|cask)\s+"(?<name>[^"]+)"'
+    | get -o name
+    | default [])
+  let names = ($names | where {|name| $name not-in $ignored_names })
+  if ($names | is-not-empty) {
+    let args = if $kind == "casks" { ["upgrade" "--cask"] | append $names } else { ["upgrade"] | append $names }
+    let upgraded = (run-command brew $args --allow-failure)
+    if $upgraded.exit_code != 0 { warning $"Some Homebrew ($kind) updates failed: ($upgraded.stderr | str trim)" }
+  }
+}
+
+# True when a Brewfile line is one of the bootstrap-contract entries.
+def bootstrap-brew-line? [
+  line: string # Brewfile line.
+]: nothing -> bool {
+  let normalized = ($line | str replace --regex '\s*#.*$' '' | str trim)
+  $normalized in (bootstrap-brew-items)
+}
+
+# Remove the bootstrap-contract entries from a Brewfile in place.
+def filter-bootstrap-brew-items [
+  path: path # Brewfile path to rewrite.
+] {
+  let lines = (open --raw $path | lines | where {|line| not (bootstrap-brew-line? $line) })
+  ($lines | str join "\n") | save --force $path
+}
+
+# Export the installed formulas and casks to a Brewfile, optionally filtering
+# out the bootstrap tools. Export failures degrade to a warning.
+def export-brewfile [
+  path: path # Destination Brewfile path.
+  --exclude-bootstrap # Filter engine-owned entries from the export.
+  --dry-run # Show the export without running it.
+]: nothing -> bool {
   if $dry_run {
     run-command brew ["bundle" "dump" $"--file=($path)" "--force"] --dry-run | ignore
     return true
   }
   mkdir ($path | path dirname)
   let result = (run-command brew ["bundle" "dump" $"--file=($path)" "--force"] --allow-failure)
-  if $result.exit_code != 0 { warning $"Brewfile export failed: ($result.stderr | str trim)"; false } else { true }
+  if $result.exit_code != 0 {
+    warning $"Brewfile export failed: ($result.stderr | str trim)"
+    false
+  } else {
+    if $exclude_bootstrap { filter-bootstrap-brew-items $path }
+    true
+  }
 }
 
-export def homebrew-backup [root: path config: record --refresh-manifests --dry-run] {
+# Capture the Homebrew inventory. With --refresh-manifests the single
+# configured Brewfile is replaced by the live dump; otherwise the dump is
+# written as an observation under the disposable state directory.
+export def homebrew-backup [
+  root: path # Private state root.
+  config: record # Loaded configuration.
+  --refresh-manifests # Replace the curated Brewfile with the live dump.
+  --dry-run # Show the dump without running it.
+] {
   let settings = $config.software.homebrew
   if not ($settings.enabled? | default false) or ((detect-os) != "macos") or not (command-exists brew) { return }
   let refresh = $refresh_manifests or ($settings.export_on_backup? | default false)
@@ -76,11 +153,16 @@ export def homebrew-backup [root: path config: record --refresh-manifests --dry-
     if $refresh { warning "Homebrew refresh requires exactly one target Brewfile; writing an observation instead" }
     observation-dir $config | path join "Brewfile"
   }
-  export-brewfile $target --dry-run=$dry_run | ignore
+  export-brewfile $target --exclude-bootstrap=$refresh --dry-run=$dry_run | ignore
   if not $refresh { info $"Homebrew observation: ($target)" }
 }
 
-export def homebrew-reconcile [root: path config: record --dry-run]: nothing -> record {
+# Compare the curated Brewfiles with a fresh dump, report-only.
+export def homebrew-reconcile [
+  root: path # Private state root.
+  config: record # Loaded configuration.
+  --dry-run # Skip the live dump.
+]: nothing -> record {
   let settings = $config.software.homebrew
   if not ($settings.enabled? | default false) or ((detect-os) != "macos") {
     return {tool: homebrew applicable: false desired_only: [] observed_only: []}
@@ -92,8 +174,8 @@ export def homebrew-reconcile [root: path config: record --dry-run]: nothing -> 
   if not (export-brewfile $observed --dry-run=$dry_run) or $dry_run {
     return {tool: homebrew applicable: true observation: $observed desired_only: [] observed_only: []}
   }
-  let desired = ($settings.manifests? | default [] | each {|manifest| brewfile-items ($root | path join $manifest) } | flatten | uniq | sort)
-  let current = (brewfile-items $observed)
+  let desired = ($settings.manifests? | default [] | each {|manifest| native-brewfile-items ($root | path join $manifest) } | flatten | uniq | sort)
+  let current = (native-brewfile-items $observed)
   {
     tool: homebrew
     applicable: true
@@ -103,7 +185,12 @@ export def homebrew-reconcile [root: path config: record --dry-run]: nothing -> 
   }
 }
 
-export def homebrew-verify [root: path config: record]: nothing -> list<record> {
+# Verification checks for Homebrew: executable presence, Brewfile health, and
+# that every declared package is installed.
+export def homebrew-verify [
+  root: path # Private state root.
+  config: record # Loaded configuration.
+]: nothing -> list<record> {
   let settings = $config.software.homebrew
   if not ($settings.enabled? | default false) or ((detect-os) != "macos") { return [] }
   mut results = [{check: "homebrew executable" ok: (command-exists brew) detail: "required on macOS"}]

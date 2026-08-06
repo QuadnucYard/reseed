@@ -4,11 +4,16 @@ use lib/config.nu [load-config parse-profiles]
 use lib/core.nu [expand-home]
 use lib/workflow.nu [workflow-backup workflow-bundle workflow-init workflow-plan workflow-reconcile workflow-restore workflow-status workflow-update workflow-verify]
 
+# Absolute path of the directory containing this engine.
 def engine-root []: nothing -> path {
   $env.FILE_PWD | path expand --no-symlink
 }
 
-def resolved-state-root [state_root: string]: nothing -> path {
+# Resolve the private state root from the CLI flag, the environment, or the
+# default, expanding any leading ~ to the home directory.
+def resolved-state-root [
+  state_root: string # Explicit state root; empty defers to environment and default.
+]: nothing -> path {
   let configured = if not ($state_root | str trim | is-empty) {
     $state_root
   } else if not ($env.RESEED_STATE_ROOT? | default "" | str trim | is-empty) {
@@ -19,7 +24,11 @@ def resolved-state-root [state_root: string]: nothing -> path {
   expand-home $configured | path expand --no-symlink
 }
 
-def resolved-config [state_root: path profiles: string]: nothing -> record {
+# Load the base configuration merged with the comma-separated profile list.
+def resolved-config [
+  state_root: path # Private state root.
+  profiles: string # Comma-separated profiles.
+]: nothing -> record {
   load-config $state_root (parse-profiles $profiles)
 }
 

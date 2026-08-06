@@ -1,0 +1,6 @@
+{
+  schema: 1
+  packages: [
+    {spec: "@biomejs/biome" commands: [biome]}
+  ]
+}

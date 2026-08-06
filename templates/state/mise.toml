@@ -3,13 +3,16 @@
 # version only when reproducibility requires it.
 rust = ["stable", "nightly"]
 starship = "latest"
+node = "latest"
+"aqua:pnpm/pnpm" = "latest"
+"aqua:astral-sh/uv" = "latest"
+# Keep only the Cargo-binstall bootstrap here when cargo_binstall is enabled.
+# Cargo binary crates belong in packages/cargo/binstall.nuon.
 # "cargo:cargo-binstall" = "latest"
 # node = "latest"
 # python = "latest"
-# "cargo:ripgrep" = "latest"
-# "npm:pnpm" = "latest"
-# "npm:@biomejs/biome" = "latest"
-# "pipx:ruff" = "latest"
+# uv tools belong in packages/uv/tools.nuon.
+# Node package-manager globals belong in the sibling packages/node manifests.
 
 [tasks."reseed:restore"]
 description = "Optional project-specific restore hook"

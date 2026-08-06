@@ -1,0 +1,4 @@
+[tools]
+"npm:example-tool" = "latest"
+"cargo:example-tool" = "latest"
+"pipx:example-tool" = "latest"

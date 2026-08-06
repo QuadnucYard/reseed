@@ -1,6 +1,17 @@
-use core.nu [fail require-file]
+# Desired-state handling: base configuration loading with profile overlays
+# (deep-merge), validation of every desired-state file, and state fingerprinting.
 
-export def deep-merge [base: record overlay: record]: nothing -> record {
+use core.nu [fail require-file]
+use mise.nu [mise-missing-backend-dependencies]
+use ../integrations/managers/node/node_manager.nu [node-spec-parse]
+use ../integrations/managers/uv.nu [uv-spec-parse]
+
+# Merge the overlay record into the base record. Nested records merge
+# recursively; every other value (including lists) replaces the base value.
+export def deep-merge [
+  base: record # Configuration to merge into.
+  overlay: record # Values to apply on top.
+]: nothing -> record {
   mut result = $base
   for entry in ($overlay | transpose key value) {
     let current = ($result | get -o $entry.key)
@@ -16,7 +27,10 @@ export def deep-merge [base: record overlay: record]: nothing -> record {
   $result
 }
 
-export def parse-profiles [profiles: string]: nothing -> list<string> {
+# Split a comma-separated profile list into trimmed, non-empty names.
+export def parse-profiles [
+  profiles: string # Comma-separated profile names; empty yields no profiles.
+]: nothing -> list<string> {
   if ($profiles | str trim | is-empty) {
     []
   } else {
@@ -24,7 +38,25 @@ export def parse-profiles [profiles: string]: nothing -> list<string> {
   }
 }
 
-export def load-config [root: path profiles: list<string> = []]: nothing -> record {
+# True when a manager manifest entry is a non-empty string or a record with a
+# non-empty string spec and an optional list of non-empty command strings.
+def valid-manager-package-entry [entry: any]: nothing -> bool {
+  let kind = ($entry | describe)
+  if $kind == "string" {
+    return (not (($entry | str trim) | is-empty))
+  }
+  if not ($kind | str starts-with "record") { return false }
+  let spec = ($entry.spec? | default null)
+  let commands = ($entry.commands? | default [])
+  ($spec != null) and (($spec | describe) == "string") and not (($spec | str trim) | is-empty) and (($commands | describe) | str starts-with "list") and ($commands | all {|command| ($command | describe) == "string" and not (($command | str trim) | is-empty) })
+}
+
+# Load recovery.nuon and merge each selected profile overlay on top, recording
+# the effective profile list in active_profiles.
+export def load-config [
+  root: path # Private state root.
+  profiles: list<string> = [] # Profile names to merge; empty uses default_profiles.
+]: nothing -> record {
   let base_path = ($root | path join "config" "recovery.nuon")
   require-file $base_path "base configuration"
   mut config = (open $base_path)
@@ -57,67 +89,275 @@ export def load-config [root: path profiles: list<string> = []]: nothing -> reco
   $config | upsert active_profiles $selected
 }
 
-export def validate-config [root: path config: record]: nothing -> list<record> {
-  mut issues = []
+# Validate the private state and every desired-state file referenced by the
+# configuration, returning one issue record per problem (no failures).
+export def validate-config [
+  root: path # Private state root.
+  config: record # Loaded configuration.
+]: nothing -> list<record> {
+  [
+    (validate-state-sentinel $root)
+    (validate-software $root $config)
+    (validate-chezmoi $root $config)
+  ] | flatten
+}
+
+# Issue when the private state root lacks the .reseed-state sentinel.
+def validate-state-sentinel [
+  root: path # Private state root.
+]: nothing -> list<record> {
   if not (($root | path join ".reseed-state") | path exists) {
-    $issues = ($issues | append {level: error area: state message: "Private state is missing .reseed-state"})
+    [{level: error area: state message: "Private state is missing .reseed-state"}]
+  } else {
+    []
   }
+}
+
+# Issue when the source root is enabled for chezmoi but has no .chezmoiroot.
+def validate-chezmoi [
+  root: path # Private state root.
+  config: record # Loaded configuration.
+]: nothing -> list<record> {
+  if ($config.chezmoi.enabled? | default false) and not (($root | path join ".chezmoiroot") | path exists) {
+    [{level: error area: chezmoi message: "The source is missing .chezmoiroot"}]
+  } else {
+    []
+  }
+}
+
+# Validate the software section for every enabled manager (winget, homebrew,
+# and mise with its cargo-binstall, uv, and Node manager extensions).
+def validate-software [
+  root: path # Private state root.
+  config: record # Loaded configuration.
+]: nothing -> list<record> {
   let software = ($config.software? | default {})
+  mut issues = []
   for manager in [winget homebrew mise] {
     let settings = ($software | get -o $manager | default {})
     if ($settings.enabled? | default false) {
-      let key = if $manager == "mise" { "configs" } else { "manifests" }
-      for relative in ($settings | get -o $key | default []) {
-        let target = ($root | path join $relative)
-        if not ($target | path exists) {
-          $issues = ($issues | append {level: error area: $manager message: $"Missing desired-state file: ($relative)"})
-        }
-        if $manager == "mise" {
-          let name = ($target | path basename)
-          if ($name != "mise.toml") and ($name !~ '^mise\.[A-Za-z0-9_-]+\.toml$') {
-            $issues = ($issues | append {level: error area: mise message: $"Unsupported config name: ($relative); use mise.toml or mise.<environment>.toml"})
-          }
-        }
-      }
+      $issues = ($issues | append (validate-desired-files $root $manager $settings))
       if $manager == "mise" {
-        for relative in ($settings.task_files? | default []) {
-          if not (($root | path join $relative) | path exists) {
-            $issues = ($issues | append {level: error area: mise message: $"Missing mise task file: ($relative)"})
-          }
-        }
-        let cargo_binstall = ($settings.cargo_binstall? | default {})
-        if ($cargo_binstall.enabled? | default false) {
-          let manifests = ($cargo_binstall.manifests? | default [])
-          if ($manifests | is-empty) {
-            $issues = ($issues | append {level: error area: cargo-binstall message: "At least one cargo-binstall manifest is required when enabled"})
-          }
-          for relative in $manifests {
-            let target = ($root | path join $relative)
-            if not ($target | path exists) {
-              $issues = ($issues | append {level: error area: cargo-binstall message: $"Missing desired-state file: ($relative)"})
-            } else {
-              let manifest = (open $target)
-              if ($manifest.schema? | default 0) != 1 {
-                $issues = ($issues | append {level: error area: cargo-binstall message: $"Unsupported manifest schema: ($relative)"})
-              }
-              let packages = ($manifest.packages? | default null)
-              if $packages == null or not (($packages | describe) | str starts-with "list") or not ($packages | all {|package| ($package | describe) == "string" }) {
-                $issues = ($issues | append {level: error area: cargo-binstall message: $"Manifest packages must be a list: ($relative)"})
-              }
-            }
-          }
-        }
+        $issues = ($issues | append (validate-mise $root $settings))
       }
     }
-  }
-
-  if ($config.chezmoi.enabled? | default false) and not (($root | path join ".chezmoiroot") | path exists) {
-    $issues = ($issues | append {level: error area: chezmoi message: "The source is missing .chezmoiroot"})
   }
   $issues
 }
 
-export def config-fingerprint [root: path config: record --engine-root: path]: nothing -> string {
+# Validate existence (and, for winget and mise, the shape) of every
+# desired-state file a manager lists under manifests or configs.
+def validate-desired-files [
+  root: path # Private state root.
+  manager: string # Manager name used for messaging.
+  settings: record # Manager settings record.
+]: nothing -> list<record> {
+  let key = if $manager == "mise" { "configs" } else { "manifests" }
+  mut issues = []
+  for relative in ($settings | get -o $key | default []) {
+    let target = ($root | path join $relative)
+    if not ($target | path exists) {
+      $issues = ($issues | append {level: error area: $manager message: $"Missing desired-state file: ($relative)"})
+    }
+    if $manager == "winget" and ($target | path exists) {
+      $issues = ($issues | append (validate-winget-manifest $target $relative))
+    }
+    if $manager == "mise" {
+      let name = ($target | path basename)
+      if ($name != "mise.toml") and ($name !~ '^mise\.[A-Za-z0-9_-]+\.toml$') {
+        $issues = ($issues | append {level: error area: mise message: $"Unsupported config name: ($relative); use mise.toml or mise.<environment>.toml"})
+      }
+    }
+  }
+  $issues
+}
+
+# Validate that a WinGet export file parses as JSON and that every source
+# lists packages with string PackageIdentifier values.
+def validate-winget-manifest [
+  target: path # WinGet export file.
+  relative: string # Path relative to the state root, for messaging.
+]: nothing -> list<record> {
+  let parsed = (try {
+    {ok: true manifest: (open $target)}
+  } catch {|error|
+    {ok: false detail: ($error.msg? | default ($error | to nuon))}
+  })
+  if not $parsed.ok {
+    return [{level: error area: winget message: $"Invalid WinGet manifest '($relative)': ($parsed.detail)"}]
+  }
+  if (($parsed.manifest | describe) !~ '^record') {
+    return [{level: error area: winget message: $"WinGet manifest must be a JSON object: ($relative)"}]
+  }
+  let sources = ($parsed.manifest.Sources? | default null)
+  let sources_kind = if $sources == null { "nothing" } else { $sources | describe }
+  if $sources == null or not (($sources_kind | str starts-with "list") or ($sources_kind | str starts-with "table")) {
+    return [{level: error area: winget message: $"WinGet manifest Sources must be a list: ($relative)"}]
+  }
+  mut issues = []
+  for source in $sources {
+    let packages = ($source.Packages? | default null)
+    let packages_kind = if $packages == null { "nothing" } else { $packages | describe }
+    if $packages == null or not (($packages_kind | str starts-with "list") or ($packages_kind | str starts-with "table")) or not ($packages | all {|package| ($package.PackageIdentifier? | default null) != null and (($package.PackageIdentifier? | default null | describe) == "string") }) {
+      $issues = ($issues | append {level: error area: winget message: $"WinGet source packages must contain string PackageIdentifier values: ($relative)"})
+    }
+  }
+  $issues
+}
+
+# Validate the mise settings: manager config selection, backend dependencies,
+# task files, and the nested cargo-binstall, uv, and Node manager sections.
+def validate-mise [
+  root: path # Private state root.
+  settings: record # Mise manager settings.
+]: nothing -> list<record> {
+  mut issues = []
+  let manager_config = ($settings.manager_config? | default (if (($settings.configs? | default []) | is-empty) { "" } else { $settings.configs | first }))
+  let configured_configs = ($settings.configs? | default [])
+  if ($manager_config | str trim | is-empty) {
+    $issues = ($issues | append {level: error area: mise message: "manager_config or at least one mise config is required"})
+  } else if $manager_config not-in $configured_configs {
+    $issues = ($issues | append {level: error area: mise message: $"Mise manager_config '($manager_config)' must be one of the selected configs: (($configured_configs | str join ', '))"})
+  }
+  # Backend dependencies are only checked when every config file exists;
+  # missing files are already reported by validate-desired-files.
+  let all_configs_exist = ($configured_configs | all {|relative| ($root | path join $relative) | path exists })
+  if $all_configs_exist {
+    for relative in $configured_configs {
+      for dependency in (mise-missing-backend-dependencies ($root | path join $relative)) {
+        $issues = ($issues | append {
+          level: error
+          area: mise
+          message: $"Mise backend '($dependency.backend)' in ($relative) requires '($dependency.tool)' in the same [tools] table; add ($dependency.tool) = \"latest\" or remove the backend-qualified entry"
+        })
+      }
+    }
+  }
+  for relative in ($settings.task_files? | default []) {
+    if not (($root | path join $relative) | path exists) {
+      $issues = ($issues | append {level: error area: mise message: $"Missing mise task file: ($relative)"})
+    }
+  }
+  $issues = ($issues | append (validate-cargo-binstall $root $settings))
+  $issues = ($issues | append (validate-package-managers $root $settings))
+  $issues
+}
+
+# Validate the cargo-binstall section: a manifest is required when enabled,
+# and each manifest must exist with schema 1 and a list of string packages.
+def validate-cargo-binstall [
+  root: path # Private state root.
+  settings: record # Mise manager settings.
+]: nothing -> list<record> {
+  let cargo_binstall = ($settings.cargo_binstall? | default {})
+  if not ($cargo_binstall.enabled? | default false) { return [] }
+  let manifests = ($cargo_binstall.manifests? | default [])
+  if ($manifests | is-empty) {
+    return [{level: error area: cargo-binstall message: "At least one cargo-binstall manifest is required when enabled"}]
+  }
+  mut issues = []
+  for relative in $manifests {
+    let target = ($root | path join $relative)
+    if not ($target | path exists) {
+      $issues = ($issues | append {level: error area: cargo-binstall message: $"Missing desired-state file: ($relative)"})
+    } else {
+      let manifest = (open $target)
+      if ($manifest.schema? | default 0) != 1 {
+        $issues = ($issues | append {level: error area: cargo-binstall message: $"Unsupported manifest schema: ($relative)"})
+      }
+      let packages = ($manifest.packages? | default null)
+      if $packages == null or not (($packages | describe) | str starts-with "list") or not ($packages | all {|package| ($package | describe) == "string" }) {
+        $issues = ($issues | append {level: error area: cargo-binstall message: $"Manifest packages must be a list: ($relative)"})
+      }
+    }
+  }
+  $issues
+}
+
+# Validate the uv, pnpm, yarn, and bun sections: a manifest is required when a
+# manager is enabled, each manifest must parse, and every package specifier
+# must be supported by the owning manager.
+def validate-package-managers [
+  root: path # Private state root.
+  settings: record # Mise manager settings.
+]: nothing -> list<record> {
+  mut issues = []
+  for manager in [uv pnpm yarn bun] {
+    let manager_settings = ($settings | get -o $manager | default {})
+    if not ($manager_settings.enabled? | default false) { continue }
+    let manifests = ($manager_settings.manifests? | default [])
+    if ($manifests | is-empty) {
+      $issues = ($issues | append {level: error area: $manager message: $"At least one ($manager) manifest is required when enabled"})
+    }
+    let spec_hint = if $manager == "uv" { "name==version" } else { "name@version" }
+    for relative in $manifests {
+      let target = ($root | path join $relative)
+      if not ($target | path exists) {
+        $issues = ($issues | append {level: error area: $manager message: $"Missing desired-state file: ($relative)"})
+      } else {
+        $issues = ($issues | append (validate-manager-manifest $target $relative $manager $spec_hint))
+      }
+    }
+  }
+  $issues
+}
+
+# Validate one uv/pnpm/yarn/bun manifest: schema 1, package entries with the
+# required shape, and package specifiers the manager can parse.
+def validate-manager-manifest [
+  target: path # Manifest file.
+  relative: string # Path relative to the state root, for messaging.
+  manager: string # Manager name.
+  spec_hint: string # Example specifier shape for error messages.
+]: nothing -> list<record> {
+  let manifest = (open $target)
+  if ($manifest.schema? | default 0) != 1 {
+    return [{level: error area: $manager message: $"Unsupported manifest schema: ($relative)"}]
+  }
+  let packages = ($manifest.packages? | default null)
+  let packages_kind = if $packages == null { "nothing" } else { $packages | describe }
+  if $packages == null or not (($packages_kind | str starts-with "list") or ($packages_kind | str starts-with "table")) or not ($packages | all {|package| valid-manager-package-entry $package }) {
+    return [{level: error area: $manager message: $"Manifest packages must contain strings or records with a non-empty spec and optional command list: ($relative)"}]
+  }
+  mut issues = []
+  for package in $packages {
+    let spec = if ($package | describe) == "string" { $package } else { $package.spec }
+    let supported = if $manager == "uv" {
+      (uv-spec-parse $spec) != null
+    } else {
+      (node-spec-parse $spec) != null
+    }
+    if not $supported {
+      $issues = ($issues | append {level: error area: $manager message: $"Unsupported package specifier '($spec)' in ($relative); use name or ($spec_hint)"})
+    }
+  }
+  $issues
+}
+
+# Hash the configuration together with every desired-state file it references.
+# The path of each file is included so a rename invalidates the fingerprint
+# even when the contents are unchanged.
+export def config-fingerprint [
+  root: path # Private state root.
+  config: record # Loaded configuration.
+  --engine-root: path # Engine directory; includes engine files when given.
+]: nothing -> string {
+  let files = ([
+    (fingerprint-state-files $root $config)
+    (fingerprint-directory-files ($root | path join "home"))
+    (fingerprint-engine-files $engine_root)
+  ] | flatten | uniq | sort | where {|path| $path | path exists })
+  let content = ($files | each {|path| $"($path):((open --raw $path | hash sha256))" } | str join "\n")
+  $"($config | to nuon)\n($content)" | hash sha256
+}
+
+# Desired-state files referenced directly by the configuration: base config,
+# profile overlays, native manifests, mise configs and task files, and the
+# nested manager manifests.
+def fingerprint-state-files [
+  root: path # Private state root.
+  config: record # Loaded configuration.
+]: nothing -> list<path> {
   mut files = [($root | path join "config" "recovery.nuon") ($root | path join ".chezmoiroot")]
   for profile in ($config.active_profiles? | default []) {
     $files = ($files | append ($root | path join "config" "profiles" $"($profile).nuon"))
@@ -136,33 +376,38 @@ export def config-fingerprint [root: path config: record --engine-root: path]: n
       for relative in (($settings.cargo_binstall? | default {}).manifests? | default []) {
         $files = ($files | append ($root | path join $relative))
       }
-    }
-  }
-  let home_root = ($root | path join "home")
-  if ($home_root | path exists) {
-    let home_files = (do { cd $home_root; glob **/* --no-dir })
-    $files = ($files | append $home_files)
-  }
-  if $engine_root != null {
-    $files = ($files | append [
-      ($engine_root | path join "reseed.nu")
-      ($engine_root | path join "bootstrap.ps1")
-      ($engine_root | path join "bootstrap.sh")
-    ])
-    for directory in [lib integrations] {
-      let path = ($engine_root | path join $directory)
-      if ($path | path exists) {
-        let engine_files = (do { cd $path; glob **/* --no-dir })
-        $files = ($files | append $engine_files)
+      for manager in [uv pnpm yarn bun] {
+        let manager_settings = ($settings | get -o $manager | default {})
+        for relative in ($manager_settings.manifests? | default []) {
+          $files = ($files | append ($root | path join $relative))
+        }
       }
     }
   }
+  $files
+}
 
-  let content = ($files
-    | uniq
-    | sort
-    | where {|path| $path | path exists }
-    | each {|path| $"($path):((open --raw $path | hash sha256))" }
-    | str join "\n")
-  $"($config | to nuon)\n($content)" | hash sha256
+# Every regular file under a directory, or [] when the directory is absent.
+def fingerprint-directory-files [
+  root: path # Directory to scan.
+]: nothing -> list<path> {
+  if not ($root | path exists) { return [] }
+  do { cd $root; glob **/* --no-dir | each {|relative| $root | path join $relative } }
+}
+
+# The engine's own scripts (entrypoint, bootstraps, and everything under lib/
+# and integrations/) that affect restore behavior.
+def fingerprint-engine-files [
+  engine_root: any # Engine directory; null when unavailable.
+]: nothing -> list<path> {
+  if $engine_root == null { return [] }
+  mut files = [
+    ($engine_root | path join "reseed.nu")
+    ($engine_root | path join "bootstrap.ps1")
+    ($engine_root | path join "bootstrap.sh")
+  ]
+  for directory in [lib integrations] {
+    $files = ($files | append (fingerprint-directory-files ($engine_root | path join $directory)))
+  }
+  $files
 }
