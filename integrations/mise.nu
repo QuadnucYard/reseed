@@ -1,4 +1,5 @@
 use ../lib/core.nu [command-exists info run-command warning]
+use cargo_binstall.nu [cargo-binstall-reconcile cargo-binstall-restore cargo-binstall-update cargo-binstall-verify]
 
 def mise-context [path: path]: nothing -> record {
   let name = ($path | path basename)
@@ -44,6 +45,8 @@ export def mise-restore [root: path config: record --dry-run] {
     run-command mise (mise-args $path ["install" "--yes"]) --dry-run=$dry_run | ignore
   }
 
+  cargo-binstall-restore $root $config --dry-run=$dry_run
+
   let configs = ($settings.configs? | default [])
   let task_config = if ($configs | is-empty) { null } else { $root | path join ($configs | last) }
   for task in ($settings.restore_tasks? | default []) {
@@ -60,6 +63,7 @@ export def mise-update [root: path config: record --dry-run] {
     let path = ($root | path join $relative)
     run-command mise (mise-args $path ["upgrade" "--yes"]) --dry-run=$dry_run | ignore
   }
+  cargo-binstall-update $root $config --dry-run=$dry_run
 }
 
 export def mise-reconcile [root: path config: record --dry-run]: nothing -> list<record> {
@@ -78,6 +82,8 @@ export def mise-reconcile [root: path config: record --dry-run]: nothing -> list
       error: ($result.stderr | str trim)
     })
   }
+  let cargo = (cargo-binstall-reconcile $root $config --dry-run=$dry_run)
+  if $cargo != null and ($cargo.applicable? | default false) { $results = ($results | append $cargo) }
   $results
 }
 
@@ -100,5 +106,6 @@ export def mise-verify [root: path config: record]: nothing -> list<record> {
       })
     }
   }
+  $results = ($results | append (cargo-binstall-verify $root $config))
   $results
 }

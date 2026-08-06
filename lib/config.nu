@@ -85,6 +85,28 @@ export def validate-config [root: path config: record]: nothing -> list<record> 
             $issues = ($issues | append {level: error area: mise message: $"Missing mise task file: ($relative)"})
           }
         }
+        let cargo_binstall = ($settings.cargo_binstall? | default {})
+        if ($cargo_binstall.enabled? | default false) {
+          let manifests = ($cargo_binstall.manifests? | default [])
+          if ($manifests | is-empty) {
+            $issues = ($issues | append {level: error area: cargo-binstall message: "At least one cargo-binstall manifest is required when enabled"})
+          }
+          for relative in $manifests {
+            let target = ($root | path join $relative)
+            if not ($target | path exists) {
+              $issues = ($issues | append {level: error area: cargo-binstall message: $"Missing desired-state file: ($relative)"})
+            } else {
+              let manifest = (open $target)
+              if ($manifest.schema? | default 0) != 1 {
+                $issues = ($issues | append {level: error area: cargo-binstall message: $"Unsupported manifest schema: ($relative)"})
+              }
+              let packages = ($manifest.packages? | default null)
+              if $packages == null or not (($packages | describe) | str starts-with "list") or not ($packages | all {|package| ($package | describe) == "string" }) {
+                $issues = ($issues | append {level: error area: cargo-binstall message: $"Manifest packages must be a list: ($relative)"})
+              }
+            }
+          }
+        }
       }
     }
   }
@@ -109,6 +131,9 @@ export def config-fingerprint [root: path config: record --engine-root: path]: n
     }
     if $manager == "mise" {
       for relative in ($settings.task_files? | default []) {
+        $files = ($files | append ($root | path join $relative))
+      }
+      for relative in (($settings.cargo_binstall? | default {}).manifests? | default []) {
         $files = ($files | append ($root | path join $relative))
       }
     }

@@ -27,6 +27,11 @@
       enabled: true
       configs: [mise.toml]
       task_files: [scripts/configure-shells.nu]
+      cargo_binstall: {
+        enabled: false
+        manifests: [packages/cargo/binstall.nuon]
+        update: true
+      }
       update: true
       restore_tasks: [reseed:shells]
     }

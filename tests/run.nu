@@ -3,6 +3,7 @@ use ../lib/core.nu [show-command]
 use ../lib/state.nu [checkpoint-path]
 use ../lib/workflow.nu [workflow-plan workflow-verification-tools]
 use ../integrations/homebrew.nu [brewfile-items]
+use ../integrations/cargo_binstall.nu [cargo-binstall-packages]
 use ../integrations/tooling.nu [tooling-observe]
 use ../integrations/winget.nu [winget-manifest-ids]
 
@@ -32,6 +33,19 @@ def main [] {
   let config = (load-config $state_root [personal])
   assert-equal $config.active_profiles [personal] "active profile recording"
   assert-true ((validate-config $state_root $config) | is-empty) "state template validates"
+
+  let cargo_config = ($config | upsert software.mise.cargo_binstall {
+    enabled: true
+    manifests: [packages/cargo/binstall.nuon]
+    update: true
+  })
+  assert-true ((validate-config $state_root $cargo_config) | is-empty) "cargo-binstall config validates"
+  let cargo_fixture_config = ($config | upsert software.mise.cargo_binstall {
+    enabled: true
+    manifests: [tests/fixtures/cargo-binstall.nuon]
+    update: true
+  })
+  assert-equal (cargo-binstall-packages $engine_root $cargo_fixture_config) [alpha beta] "cargo-binstall packages are unique and sorted"
 
   let winget_ids = (winget-manifest-ids ($state_root | path join "packages" "windows" "winget.json"))
   assert-equal ($winget_ids | length) 4 "WinGet package extraction"

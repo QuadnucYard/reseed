@@ -43,14 +43,18 @@ Prefer the broadest portable owner that accurately represents the tool:
 
 1. Put runtimes and portable command-line tools in `mise.toml`.
 2. Put GUI applications and OS-specific packages in WinGet or Brewfiles.
-3. Keep direct Cargo, pnpm, Bun, uv, pipx, or similar commands in a mise task
-   only when mise cannot own that package cleanly.
-4. Put machine-specific or role-specific manifests in a profile overlay.
+3. Put Cargo binary crates in the configured `cargo-binstall` manifest under
+   `packages/cargo/`; Reseed bootstraps `cargo-binstall` through mise and
+   installs the listed crates through it.
+4. Keep direct Cargo, pnpm, Bun, uv, pipx, or similar commands in a mise task
+   only when the package cannot be represented by a native backend.
+5. Put machine-specific or role-specific manifests in a profile overlay.
 
-Reseed observes existing Cargo, pnpm, Bun, uv, npm, and Yarn global state but
-does not invent replacement lock formats for them. Review the observation files
-and migrate portable commands to mise backends; retain a native mise task only
-when the original package manager has required installation semantics.
+Reseed observes existing Cargo, pnpm, Bun, uv, npm, and Yarn global state. Use
+the native Cargo-binstall manifest for Cargo binaries; review the other
+observation files and migrate portable commands to mise backends. Retain a
+native mise task only when the original package manager has required
+installation semantics.
 
 This ordering reserves room for additional platforms and managers without
 requiring a generic provider abstraction. A new integration is a focused

@@ -3,6 +3,7 @@
 # version only when reproducibility requires it.
 rust = ["stable", "nightly"]
 starship = "latest"
+# "cargo:cargo-binstall" = "latest"
 # node = "latest"
 # python = "latest"
 # "cargo:ripgrep" = "latest"

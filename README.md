@@ -41,7 +41,7 @@ The private repository contains all desired workstation state:
 ├── .chezmoiroot          points chezmoi at home/
 ├── config/               recovery policy and profile overlays
 ├── home/                 private chezmoi source files
-├── packages/             WinGet and Homebrew desired packages
+├── packages/             native manifests and cargo-binstall packages
 ├── scripts/              private idempotent restore tasks
 └── mise.toml             shared runtimes and portable tools
 ```
@@ -55,8 +55,9 @@ The private repository contains all desired workstation state:
 - Kopia can optionally snapshot narrow opaque application state.
 
 The starter state installs Git, chezmoi, Nushell, and mise on Windows. On
-macOS it also installs Fish. Mise then installs Rust stable, Rust nightly, and
-Starship on both platforms. Native packages run before mise; shell setup and
+macOS it also installs Fish. Mise then installs Rust stable, Rust nightly,
+Starship, and the configured Cargo-binstall bootstrap on both platforms.
+Native packages run before mise; Cargo-binstall packages, shell setup, and
 chezmoi run afterwards.
 
 Starship uses one private `~/.config/starship.toml` for every shell. Fish has a
