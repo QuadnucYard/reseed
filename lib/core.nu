@@ -82,10 +82,12 @@ export def show-command [
 
 # Run an external program, returning {exit_code, stdout, stderr, skipped}.
 #
-# --dry-run prints the command without executing it. --allow-failure captures
-# failures (including a missing executable, reported as exit 127) into the
-# result record instead of failing. Any other nonzero exit aborts with a
-# redacted error message.
+# Output streams to the terminal by default so long-running actions show
+# progress; with --capture the stdout and stderr are instead collected into
+# the result record for parsing. --dry-run prints the command without
+# executing it. --allow-failure captures failures (including a missing
+# executable, reported as exit 127) into the result record instead of failing.
+# Any other nonzero exit aborts with a redacted error message.
 export def run-command [
   program: string # Program to run.
   args: list<string> = [] # Arguments to pass.
@@ -94,6 +96,7 @@ export def run-command [
   --dry-run # Print the command without executing it.
   --allow-failure # Return the result instead of failing on nonzero exit.
   --quiet # Suppress the "running:" banner.
+  --capture # Collect stdout/stderr into the result instead of streaming them.
 ]: nothing -> record {
   let shown = (show-command $program $args)
   if $dry_run {
@@ -103,36 +106,61 @@ export def run-command [
 
   if not $quiet { info $"running: ($shown)" }
   let invoke = {| | if $cwd == null {
-    run-external $program ...$args | complete
+    run-external $program ...$args
   } else {
-    do { cd $cwd; run-external $program ...$args | complete }
+    do { cd $cwd; run-external $program ...$args }
   }}
-  let result = if $allow_failure {
+  let result = if $capture {
+    # Nushell aborts on nonzero external exit unless the output is consumed,
+    # so capture through "complete" to read it and the exit code back.
+    let invoke = {| | if $cwd == null {
+      run-external $program ...$args | complete
+    } else {
+      do { cd $cwd; run-external $program ...$args | complete }
+    }}
+    if $allow_failure {
+      try {
+        if ($environment | is-empty) {
+          do $invoke
+        } else {
+          with-env $environment { do $invoke }
+        }
+      } catch {|error|
+        # A command that cannot be started (e.g. not on PATH) surfaces as an
+        # exception; normalize it to exit 127 like a shell would.
+        {exit_code: 127 stdout: "" stderr: ($error.msg? | default ($error | to nuon)) skipped: false}
+      }
+    } else if ($environment | is-empty) {
+      do $invoke
+    } else {
+      with-env $environment { do $invoke }
+    }
+  } else {
+    # Streamed mode: output appears live, and a nonzero exit (or an
+    # unstartable command) surfaces as a catchable error carrying the code.
     try {
       if ($environment | is-empty) {
         do $invoke
       } else {
         with-env $environment { do $invoke }
       }
+      {exit_code: 0 stdout: "" stderr: "" skipped: false}
     } catch {|error|
-      # A command that cannot be started (e.g. not on PATH) surfaces as an
-      # exception; normalize it to exit 127 like a shell would.
-      {exit_code: 127 stdout: "" stderr: ($error.msg? | default ($error | to nuon)) skipped: false}
+      {exit_code: ($error.exit_code? | default 127) stdout: "" stderr: "" skipped: false}
     }
-  } else if ($environment | is-empty) {
-    do $invoke
-  } else {
-    with-env $environment { do $invoke }
   }
 
   let normalized = ($result | upsert skipped false)
   if ($normalized.exit_code != 0) and (not $allow_failure) {
-    let detail = if ($normalized.stderr | str trim | is-empty) {
-      $normalized.stdout | str trim
-    } else {
-      $normalized.stderr | str trim
+    if $capture {
+      let detail = if ($normalized.stderr | str trim | is-empty) {
+        $normalized.stdout | str trim
+      } else {
+        $normalized.stderr | str trim
+      }
+      fail $"Command failed (exit ($normalized.exit_code)): ($shown)\n(scrub-url $detail)"
     }
-    fail $"Command failed (exit ($normalized.exit_code)): ($shown)\n(scrub-url $detail)"
+    fail $"Command failed (exit ($normalized.exit_code)): ($shown)"
   }
   $normalized
 }

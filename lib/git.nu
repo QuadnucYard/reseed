@@ -11,12 +11,12 @@ export def git-status [
   if not (command-exists git) {
     return {available: false repository: false clean: null branch: null}
   }
-  let probe = (run-command git ["-C" ($root | into string) "rev-parse" "--is-inside-work-tree"] --allow-failure --quiet)
+  let probe = (run-command git ["-C" ($root | into string) "rev-parse" "--is-inside-work-tree"] --allow-failure --quiet --capture)
   if $probe.exit_code != 0 {
     return {available: true repository: false clean: null branch: null}
   }
-  let changes = (run-command git ["-C" ($root | into string) "status" "--porcelain"] --quiet)
-  let branch = (run-command git ["-C" ($root | into string) "branch" "--show-current"] --quiet)
+  let changes = (run-command git ["-C" ($root | into string) "status" "--porcelain"] --quiet --capture)
+  let branch = (run-command git ["-C" ($root | into string) "branch" "--show-current"] --quiet --capture)
   {
     available: true
     repository: true
@@ -46,7 +46,7 @@ export def git-init [
     # configured branch, creating it when it does not exist yet.
     if ($status.branch | str trim | is-empty) {
       let branch_ref = $"refs/heads/($branch)"
-      let branch_exists = (run-command git ["-C" ($root | into string) "show-ref" "--verify" $branch_ref] --allow-failure --quiet)
+      let branch_exists = (run-command git ["-C" ($root | into string) "show-ref" "--verify" $branch_ref] --allow-failure --quiet --capture)
       let args = if $branch_exists.exit_code == 0 {
         ["-C" ($root | into string) "switch" $branch]
       } else {
@@ -62,7 +62,7 @@ export def git-init [
     if $dry_run and not $status.repository {
       run-command git ["-C" ($root | into string) "remote" "add" $remote $remote_url] --dry-run | ignore
     } else {
-      let existing = (run-command git ["-C" ($root | into string) "remote" "get-url" $remote] --allow-failure --quiet)
+      let existing = (run-command git ["-C" ($root | into string) "remote" "get-url" $remote] --allow-failure --quiet --capture)
       if $existing.exit_code == 0 {
         let current = ($existing.stdout | str trim)
         if $current != $remote_url {
@@ -140,9 +140,9 @@ def archive-git-root [root: path target: path archive: path label: string]: noth
   if not $status.repository {
     fail $"Secure bundles require the ($label) root to be a Git repository: ($root)"
   }
-  let head = (run-command git ["-C" ($root | into string) "rev-parse" "--verify" "HEAD"] --allow-failure --quiet)
+  let head = (run-command git ["-C" ($root | into string) "rev-parse" "--verify" "HEAD"] --allow-failure --quiet --capture)
   if $head.exit_code != 0 { fail $"Bundle creation requires a commit in the ($label) repository" }
-  let tracked_changes = (run-command git ["-C" ($root | into string) "status" "--porcelain" "--untracked-files=no"] --quiet)
+  let tracked_changes = (run-command git ["-C" ($root | into string) "status" "--porcelain" "--untracked-files=no"] --quiet --capture)
   if not ($tracked_changes.stdout | str trim | is-empty) {
     fail $"The ($label) repository has uncommitted tracked changes"
   }
@@ -210,7 +210,7 @@ def bundle-tools [
     if not $copied { continue }
     let copied_path = ($tool_dir | path join ($source | path basename))
     let smoke = (try {
-      run-command ($copied_path | into string) ["--version"] --allow-failure --quiet
+      run-command ($copied_path | into string) ["--version"] --allow-failure --quiet --capture
     } catch {|error|
       {exit_code: 127 stdout: "" stderr: ($error.msg? | default ($error | to nuon))}
     })

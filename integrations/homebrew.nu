@@ -170,9 +170,10 @@ export def homebrew-restore [
   let settings = $config.software.homebrew
   if not ($settings.enabled? | default false) or ((detect-os) != "macos") { return }
   if not (command-exists brew) and not $dry_run { error make {msg: "Homebrew is required for the macOS package stage"} }
+  let environment = (homebrew-env $settings)
   for manifest in ($settings.manifests? | default []) {
     let path = ($root | path join $manifest)
-    run-command brew ["bundle" "install" $"--file=($path)"] --environment=(homebrew-env $settings) --dry-run=$dry_run | ignore
+    run-command brew ["bundle" "install" $"--file=($path)"] --environment=$environment --dry-run=$dry_run | ignore
   }
 }
 
@@ -186,12 +187,16 @@ export def homebrew-update [
   let settings = $config.software.homebrew
   if not ($settings.enabled? | default false) or not ($settings.update? | default true) or ((detect-os) != "macos") { return }
   if not (command-exists brew) { warning "Homebrew is unavailable; skipping macOS package updates"; return }
-  run-command brew ["update"] --environment=(homebrew-env $settings) --dry-run=$dry_run | ignore
+  let environment = (homebrew-env $settings)
+  let mirror = (homebrew-mirror-label $environment)
+  if ($mirror | is-not-empty) { info $"Homebrew mirror: ($mirror)" }
+  run-command brew ["update"] --environment=$environment --dry-run=$dry_run | ignore
   for manifest in ($settings.manifests? | default []) {
     let path = ($root | path join $manifest)
-    run-command brew ["bundle" "install" $"--file=($path)"] --environment=(homebrew-env $settings) --dry-run=$dry_run | ignore
+    info $"installing Homebrew packages from ($manifest)"
+    run-command brew ["bundle" "install" $"--file=($path)"] --environment=$environment --dry-run=$dry_run | ignore
     for kind in [brews casks] {
-      upgrade-brewfile-kind $path $kind (homebrew-env $settings) --dry-run=$dry_run
+      upgrade-brewfile-kind $path $kind $environment --dry-run=$dry_run
     }
   }
 }
@@ -204,7 +209,7 @@ def upgrade-brewfile-kind [
   environment: record # Homebrew environment from the settings.
   --dry-run # Show the upgrades without running them.
 ] {
-  let listed = (run-command brew ["bundle" "list" $"--file=($path)" $"--($kind)"] --allow-failure --environment=$environment --dry-run=$dry_run)
+  let listed = (run-command brew ["bundle" "list" $"--file=($path)" $"--($kind)"] --allow-failure --environment=$environment --dry-run=$dry_run --capture)
   if ($listed.exit_code != 0) or $dry_run { return }
   let names = ($listed.stdout | lines | each {|line| $line | str trim } | compact)
   let ignored_names = (bootstrap-brew-items
@@ -215,7 +220,10 @@ def upgrade-brewfile-kind [
   if ($names | is-not-empty) {
     let args = if $kind == "casks" { ["upgrade" "--cask"] | append $names } else { ["upgrade"] | append $names }
     let upgraded = (run-command brew $args --allow-failure --environment=$environment)
-    if $upgraded.exit_code != 0 { warning $"Some Homebrew ($kind) updates failed: ($upgraded.stderr | str trim)" }
+    if $upgraded.exit_code != 0 {
+      let stderr = ($upgraded.stderr | str trim)
+      warning (if ($stderr | is-empty) { $"Some Homebrew ($kind) updates failed" } else { $"Some Homebrew ($kind) updates failed: ($stderr)" })
+    }
   }
 }
 
@@ -248,7 +256,7 @@ def export-brewfile [
     return true
   }
   mkdir ($path | path dirname)
-  let result = (run-command brew ["bundle" "dump" $"--file=($path)" "--force"] --environment=$environment --allow-failure)
+  let result = (run-command brew ["bundle" "dump" $"--file=($path)" "--force"] --environment=$environment --allow-failure --capture)
   if $result.exit_code != 0 {
     warning $"Brewfile export failed: ($result.stderr | str trim)"
     false
@@ -322,7 +330,7 @@ export def homebrew-verify [
     $results = ($results | append {check: $"Brewfile: ($manifest)" ok: ($path | path exists) detail: $"((brewfile-items $path | length)) entries"})
     if (command-exists brew) and ($path | path exists) {
       let checked = (try {
-        run-command brew ["bundle" "check" $"--file=($path)"] --environment=(homebrew-env $settings) --allow-failure
+        run-command brew ["bundle" "check" $"--file=($path)"] --environment=(homebrew-env $settings) --allow-failure --capture
       } catch {|error| {exit_code: 1 stdout: "" stderr: ($error.msg? | default "failed to start brew")} })
       $results = ($results | append {
         check: $"Homebrew packages installed: ($manifest)"

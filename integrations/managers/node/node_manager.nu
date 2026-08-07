@@ -136,7 +136,7 @@ def require-yarn-global [
     error make {msg: "mise is required for configured yarn globals"}
   }
   let result = (try {
-    run-mise-managed $root $config yarn ["--version"] "mise is required for configured yarn globals" --allow-failure
+    run-mise-managed $root $config yarn ["--version"] "mise is required for configured yarn globals" --allow-failure --capture
   } catch {|error|
     {exit_code: 127 stdout: "" stderr: ($error.msg? | default ($error | to nuon))}
   })
@@ -158,8 +158,9 @@ def run-node-manager [
   args: list<string> # Manager arguments.
   --dry-run # Show the command without running it.
   --allow-failure # Return the result instead of failing on nonzero exit.
+  --capture # Collect stdout/stderr into the result instead of streaming them.
 ]: nothing -> record {
-  run-mise-managed $root $config $manager $args $"mise is required for configured ($manager) globals" --dry-run=$dry_run --allow-failure=$allow_failure
+  run-mise-managed $root $config $manager $args $"mise is required for configured ($manager) globals" --dry-run=$dry_run --allow-failure=$allow_failure --capture=$capture
 }
 
 # Install every configured global package for a Node manager.
@@ -297,7 +298,7 @@ def inventory-output [
     bun => [pm ls --global --json]
   }
   let result = (try {
-    run-node-manager $root $config $manager $args --allow-failure
+    run-node-manager $root $config $manager $args --allow-failure --capture
   } catch {|error|
     {exit_code: 127 stdout: "" stderr: ($error.msg? | default ($error | to nuon))}
   })

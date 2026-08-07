@@ -46,7 +46,7 @@ def observe-command [
   }
 
   let result = (try {
-    run-command $actual_program $actual_args --environment=$environment --allow-failure --dry-run=$dry_run
+    run-command $actual_program $actual_args --environment=$environment --allow-failure --dry-run=$dry_run --capture
   } catch {|error|
     {
       exit_code: 127

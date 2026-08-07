@@ -11,7 +11,7 @@ export def github-has-gpg-key []: nothing -> bool {
   if not (command-exists gh) { return false }
   let id = (gpg-secret-key-id)
   if ($id | is-empty) { return false }
-  let listing = (run-command gh ["gpg-key" "list" "--json" "key_id"] --allow-failure --quiet)
+  let listing = (run-command gh ["gpg-key" "list" "--json" "key_id"] --allow-failure --quiet --capture)
   if $listing.exit_code != 0 { return false }
   let ids = (try { $listing.stdout | from json | get key_id } catch { return false })
   ($ids | any {|remote| ($remote | str trim) == $id })
@@ -36,7 +36,13 @@ export def setup-gpg-prereq [
   if (command-exists gpg) {
     {step: gpg-prereq ok: true detail: "GnuPG installed"}
   } else {
-    {step: gpg-prereq ok: false detail: $"GnuPG install failed: ($installed.stderr | str trim); install it manually and rerun"}
+    let stderr = ($installed.stderr | str trim)
+    let detail = if ($stderr | is-empty) {
+      "GnuPG install failed; install it manually and rerun"
+    } else {
+      $"GnuPG install failed: ($stderr); install it manually and rerun"
+    }
+    {step: gpg-prereq ok: false detail: $detail}
   }
 }
 
@@ -70,7 +76,9 @@ export def setup-gpg-key [
   let generated = (run-command gpg ["--batch" "--generate-key" ($batch | into string)] --allow-failure)
   rm --force $batch
   if $generated.exit_code != 0 {
-    return {step: gpg-key ok: false detail: ($generated.stderr | str trim)}
+    let stderr = ($generated.stderr | str trim)
+    let detail = if ($stderr | is-empty) { "key generation failed" } else { $stderr }
+    return {step: gpg-key ok: false detail: $detail}
   }
   let new_id = (gpg-secret-key-id)
   if ($new_id | is-empty) {
@@ -92,11 +100,11 @@ export def setup-gpg-github [
   if not (command-exists gh) { return {step: gpg-github ok: false detail: "gh is not installed"} }
   if (github-has-gpg-key) { return {step: gpg-github ok: true detail: "key already on GitHub"} }
   let armor = (mktemp)
-  run-command gpg ["--armor" "--export" $key_id] | get stdout | save --force $armor
-  let uploaded = (run-command gh ["gpg-key" "add" ($armor | into string)] --allow-failure)
+  run-command gpg ["--armor" "--export" $key_id] --capture | get stdout | save --force $armor
+  let uploaded = (run-command gh ["gpg-key" "add" ($armor | into string)] --allow-failure --capture)
   if $uploaded.exit_code != 0 and (($uploaded.stderr | str contains "401") or ($uploaded.stderr | str contains "403")) {
     run-command gh ["auth" "refresh" "-h" "github.com" "-s" "write:gpg_key"] | ignore
-    let retry = (run-command gh ["gpg-key" "add" ($armor | into string)] --allow-failure)
+    let retry = (run-command gh ["gpg-key" "add" ($armor | into string)] --allow-failure --capture)
     rm --force $armor
     if $retry.exit_code != 0 {
       return {step: gpg-github ok: false detail: ($retry.stderr | str trim)}
@@ -124,12 +132,12 @@ export def setup-gpg-verify [
     "-c" $"user.name=($name)"
     "-c" $"user.email=($email)"
     "commit" "--allow-empty" "-S" "-m" "reseed signature verification"
-  ] --allow-failure --quiet)
+  ] --allow-failure --quiet --capture)
   if $committed.exit_code != 0 {
     rm --recursive --force $scratch
     return {step: gpg-verify ok: false detail: ($committed.stderr | str trim)}
   }
-  let verified = (run-command git ["-C" ($scratch | into string) "log" "-1" "--format=%G?"] --quiet)
+  let verified = (run-command git ["-C" ($scratch | into string) "log" "-1" "--format=%G?"] --quiet --capture)
   rm --recursive --force $scratch
   let status = ($verified.stdout | str trim)
   if $status != "G" {

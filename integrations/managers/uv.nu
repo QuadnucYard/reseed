@@ -133,7 +133,7 @@ def installed-uv-packages [
     return {available: false packages: [] detail: "mise is unavailable"}
   }
   let result = (try {
-    run-mise-managed $root $config "uv" ["tool" "list" "--show-version-specifiers"] "mise is required for the configured uv tools" --allow-failure
+    run-mise-managed $root $config "uv" ["tool" "list" "--show-version-specifiers"] "mise is required for the configured uv tools" --allow-failure --capture
   } catch {|error|
     {
       exit_code: 127

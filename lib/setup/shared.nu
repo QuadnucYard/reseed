@@ -10,7 +10,7 @@ export def machine-name []: nothing -> string {
   let direct = ($nu.os-info.hostname? | default "")
   if not ($direct | is-empty) { return $direct }
   if not (command-exists hostname) { return "machine" }
-  let from_command = ((run-command hostname [] --allow-failure --quiet).stdout | str trim)
+  let from_command = ((run-command hostname [] --allow-failure --quiet --capture).stdout | str trim)
   if ($from_command | is-empty) { "machine" } else { $from_command }
 }
 
@@ -34,16 +34,16 @@ export def ssh-key-status []: nothing -> record {
 # Whether the SSH agent is running (ssh-add -l succeeds when it is).
 export def ssh-agent-running []: nothing -> bool {
   if not (command-exists ssh-add) { return false }
-  (run-command ssh-add ["-l"] --allow-failure --quiet).exit_code == 0
+  (run-command ssh-add ["-l"] --allow-failure --quiet --capture).exit_code == 0
 }
 
 # GitHub CLI authentication status: a working token probe plus the token's
 # declared scopes.
 export def gh-auth-status []: nothing -> record {
   if not (command-exists gh) { return {authed: false login: "" scopes: []} }
-  let probe = (run-command gh ["api" "user" "--jq" ".login"] --allow-failure --quiet)
+  let probe = (run-command gh ["api" "user" "--jq" ".login"] --allow-failure --quiet --capture)
   if $probe.exit_code != 0 { return {authed: false login: "" scopes: []} }
-  let status = (run-command gh ["auth" "status"] --allow-failure --quiet)
+  let status = (run-command gh ["auth" "status"] --allow-failure --quiet --capture)
   {authed: true login: ($probe.stdout | str trim) scopes: (parse-gh-scopes $status.stdout)}
 }
 
@@ -64,7 +64,7 @@ export def parse-gh-scopes [text: string]: nothing -> list<string> {
 # Long key id of the first GPG secret key, or "" when none exists.
 export def gpg-secret-key-id []: nothing -> string {
   if not (command-exists gpg) { return "" }
-  let listing = (run-command gpg ["--list-secret-keys" "--with-colons" "--keyid-format=long"] --allow-failure --quiet)
+  let listing = (run-command gpg ["--list-secret-keys" "--with-colons" "--keyid-format=long"] --allow-failure --quiet --capture)
   if $listing.exit_code != 0 { return "" }
   let ids = (parse-gpg-secret-ids $listing.stdout)
   if ($ids | is-empty) { "" } else { $ids | first }

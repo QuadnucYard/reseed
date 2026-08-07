@@ -56,12 +56,13 @@ export def run-mise-managed [
   requirement: string # Error message when mise is unavailable.
   --dry-run # Show the command without running it.
   --allow-failure # Return the result instead of failing on nonzero exit.
+  --capture # Collect stdout/stderr into the result instead of streaming them.
 ]: nothing -> record {
   if not $dry_run and not (command-exists mise) {
     error make {msg: $requirement}
   }
   let mise_config = (mise-manager-config $root $config)
-  run-command mise (mise-exec-args $mise_config $program $args) --environment=(managed-tool-environment) --dry-run=$dry_run --allow-failure=$allow_failure
+  run-command mise (mise-exec-args $mise_config $program $args) --environment=(managed-tool-environment) --dry-run=$dry_run --allow-failure=$allow_failure --capture=$capture
 }
 
 # Read the [tools] table of a mise config as a record of tool name to spec.

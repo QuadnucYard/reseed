@@ -96,7 +96,7 @@ def installed-cargo-packages [
     return {available: false packages: [] detail: "mise is unavailable"}
   }
   let result = (try {
-    run-mise-managed $root $config "cargo" ["install" "--list"] "mise is required for the configured Cargo packages" --allow-failure
+    run-mise-managed $root $config "cargo" ["install" "--list"] "mise is required for the configured Cargo packages" --allow-failure --capture
   } catch {|error|
     {
       exit_code: 127
@@ -155,7 +155,7 @@ export def cargo-binstall-verify [
   if not ($configured.enabled? | default false) { return [] }
   let packages = (cargo-binstall-packages $root $config)
   let executable = (try {
-    run-mise-managed $root $config "cargo-binstall" ["--version"] "mise is required for the configured Cargo packages" --allow-failure
+    run-mise-managed $root $config "cargo-binstall" ["--version"] "mise is required for the configured Cargo packages" --allow-failure --capture
   } catch {|error|
     {exit_code: 127 stdout: "" stderr: ($error.msg? | default "failed to start mise")}
   })

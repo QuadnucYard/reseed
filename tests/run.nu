@@ -32,7 +32,16 @@ def test-config-layer [
   assert eq (scrub-url "ssh://git@example.com/repo") "ssh://***@example.com/repo" "SSH URLs with userinfo are redacted"
   assert eq (show-command git ["clone" "https://user:token@example.com/repo"]) "git clone https://***@example.com/repo" "command display redacts credentials"
   let missing_command = (run-command "reseed-no-such-command" [] --allow-failure --quiet)
-  assert eq $missing_command.exit_code 127 "missing executables are captured under allow-failure"
+  assert eq $missing_command.exit_code 127 "missing executables stream a normalized failure"
+  let missing_captured = (run-command "reseed-no-such-command" [] --allow-failure --quiet --capture)
+  assert eq $missing_captured.exit_code 127 "missing executables are captured under allow-failure"
+  let failed_run = (run-command nu ["-c" "exit 5"] --allow-failure --quiet)
+  assert eq $failed_run.exit_code 5 "streamed commands report their real exit code"
+  assert eq ($failed_run.stdout + $failed_run.stderr) "" "streamed commands do not fill the result record"
+  let success_run = (run-command nu ["--version"] --allow-failure --quiet)
+  assert eq $success_run.exit_code 0 "successful streamed commands exit clean"
+  let success_captured = (run-command nu ["-c" "print hi"] --allow-failure --quiet --capture)
+  assert eq ($success_captured.stdout | str trim) "hi" "captured commands collect stdout"
   let config = (load-config $state_root [personal])
   assert eq $config.active_profiles [personal] "active profile recording"
   assert ((validate-config $state_root $config) | is-empty) "state template validates"

@@ -78,7 +78,7 @@ export def winget-update [
     let result = (run-command winget [
       "upgrade" "--id" $id "--exact" "--accept-source-agreements"
       "--accept-package-agreements" "--disable-interactivity"
-    ] --dry-run=$dry_run --allow-failure)
+    ] --dry-run=$dry_run --allow-failure --capture)
     if ($result.exit_code != 0) and not (($result.stdout | str lowercase) =~ 'no applicable upgrade|no available upgrade|no installed package') {
       warning $"WinGet could not update ($id): ($result.stderr | str trim)"
     }
@@ -112,7 +112,7 @@ def export-winget [
     return true
   }
   mkdir ($path | path dirname)
-  let result = (run-command winget ["export" "--output" ($path | into string) "--accept-source-agreements"] --allow-failure)
+  let result = (run-command winget ["export" "--output" ($path | into string) "--accept-source-agreements"] --allow-failure --capture)
   if $result.exit_code != 0 {
     warning $"WinGet export failed: ($result.stderr | str trim)"
     false
@@ -193,7 +193,7 @@ export def winget-verify [
     if (command-exists winget) {
       for id in $ids {
         let installed = (try {
-          run-command winget ["list" "--id" $id "--exact" "--accept-source-agreements" "--disable-interactivity"] --allow-failure
+          run-command winget ["list" "--id" $id "--exact" "--accept-source-agreements" "--disable-interactivity"] --allow-failure --capture
         } catch {|error| {exit_code: 1 stdout: "" stderr: ($error.msg? | default "failed to start winget")} })
         $results = ($results | append {
           check: $"winget installed: ($id)"

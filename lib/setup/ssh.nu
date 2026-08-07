@@ -12,7 +12,7 @@ export def github-has-ssh-key []: nothing -> bool {
   let key = (ssh-key-status)
   if not $key.key_present { return false }
   let local = (open --raw $key.pub_path | str trim)
-  let listing = (run-command gh ["ssh-key" "list" "--json" "key"] --allow-failure --quiet)
+  let listing = (run-command gh ["ssh-key" "list" "--json" "key"] --allow-failure --quiet --capture)
   if $listing.exit_code != 0 { return false }
   let keys = (try { $listing.stdout | from json | get key } catch { return false })
   ($keys | any {|remote| ($remote | str trim) == $local })
@@ -170,12 +170,12 @@ export def setup-ssh-github [
   }
   if not (github-has-ssh-key) {
     let title = ($"reseed-(machine-name)" | str replace --regex '\s+' "_")
-    let uploaded = (run-command gh ["ssh-key" "add" $key.pub_path "-t" $title] --allow-failure)
+    let uploaded = (run-command gh ["ssh-key" "add" $key.pub_path "-t" $title] --allow-failure --capture)
     if $uploaded.exit_code != 0 {
       return {step: ssh-github ok: false detail: ($uploaded.stderr | str trim)}
     }
   }
-  let test = (run-command ssh ["-o" "BatchMode=yes" "-o" "ConnectTimeout=10" "-o" "StrictHostKeyChecking=accept-new" "-T" "git@github.com"] --allow-failure)
+  let test = (run-command ssh ["-o" "BatchMode=yes" "-o" "ConnectTimeout=10" "-o" "StrictHostKeyChecking=accept-new" "-T" "git@github.com"] --allow-failure --capture)
   let output = ($test.stdout + " " + $test.stderr)
   let ok = ($output | str contains "Hi ")
   {step: ssh-github ok: $ok detail: (if $ok { "SSH login to GitHub verified" } else { $"GitHub SSH login failed: ($test.stderr | str trim)" })}
@@ -228,7 +228,9 @@ export def setup-ssh-hosts [
       if $added.exit_code == 0 {
         $reports = ($reports | append $"admin list: (admin-key-path $host.os)")
       } else {
-        $reports = ($reports | append $"admin list: failed: ($added.stderr | str trim)")
+        let stderr = ($added.stderr | str trim)
+        let failure = if ($stderr | is-empty) { "admin list: failed" } else { $"admin list: failed: ($stderr)" }
+        $reports = ($reports | append $failure)
       }
     }
   }

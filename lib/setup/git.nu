@@ -7,7 +7,7 @@ use ./shared.nu [first-external-path gpg-secret-key-id]
 # Git global configuration value, or "" when unset.
 export def git-config-get [key: string]: nothing -> string {
   if not (command-exists git) { return "" }
-  let value = (run-command git ["config" "--global" "--get" $key] --allow-failure --quiet)
+  let value = (run-command git ["config" "--global" "--get" $key] --allow-failure --quiet --capture)
   if $value.exit_code != 0 { "" } else { $value.stdout | str trim }
 }
 

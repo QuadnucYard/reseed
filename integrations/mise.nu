@@ -120,7 +120,7 @@ export def mise-reconcile [
   mut results = []
   for relative in ($settings.configs? | default []) {
     let path = ($root | path join $relative)
-    let result = (run-command mise (mise-args $path ["outdated"]) --allow-failure --dry-run=$dry_run)
+    let result = (run-command mise (mise-args $path ["outdated"]) --allow-failure --dry-run=$dry_run --capture)
     $results = ($results | append {
       tool: mise
       config: $relative
@@ -157,7 +157,7 @@ export def mise-verify [
   if (command-exists mise) {
     for relative in ($settings.configs? | default []) {
       let path = ($root | path join $relative)
-      let missing = (run-command mise (mise-args $path ["ls" "--missing"]) --allow-failure)
+      let missing = (run-command mise (mise-args $path ["ls" "--missing"]) --allow-failure --capture)
       $results = ($results | append {
         check: $"mise tools installed: ($relative)"
         ok: (($missing.exit_code == 0) and ($missing.stdout | str trim | is-empty))

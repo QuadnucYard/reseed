@@ -51,7 +51,7 @@ export def chezmoi-verify [
   if not (command-exists chezmoi) {
     return [{check: "chezmoi executable" ok: false detail: "not found"}]
   }
-  let result = (run-command chezmoi ["--source" ($root | into string) "diff" "--no-pager"] --allow-failure)
+  let result = (run-command chezmoi ["--source" ($root | into string) "diff" "--no-pager"] --allow-failure --capture)
   let difference = ($result.stdout | str trim)
   [
     {check: "chezmoi executable" ok: true detail: "available"}

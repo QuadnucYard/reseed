@@ -7,7 +7,7 @@ use ./shared.nu [first-external-path gpg-secret-key-id]
 # jj user configuration value, or "" when unset.
 export def jj-config-get [key: string]: nothing -> string {
   if not (command-exists jj) { return "" }
-  let value = (run-command jj ["config" "get" $key] --allow-failure --quiet)
+  let value = (run-command jj ["config" "get" $key] --allow-failure --quiet --capture)
   if $value.exit_code != 0 { "" } else { $value.stdout | str trim }
 }
 
@@ -42,7 +42,8 @@ export def setup-jj-prereq [
   if (command-exists jj) {
     {step: jj-prereq ok: true detail: "jj installed"}
   } else {
-    {step: jj-prereq ok: false detail: $"jj install failed: ($installed.stderr | str trim)"}
+    let stderr = ($installed.stderr | str trim)
+    {step: jj-prereq ok: false detail: (if ($stderr | is-empty) { "jj install failed" } else { $"jj install failed: ($stderr)" })}
   }
 }
 
