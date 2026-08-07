@@ -6,6 +6,7 @@ use core.nu [confirm detect-os fail info warning]
 use config.nu [config-fingerprint load-config validate-config]
 use state.nu [complete-stage fail-stage load-checkpoint stage-done]
 use git.nu [git-bundle git-commit git-init git-pull git-status]
+use secrets.nu [commit-change-summary scan-commit-secrets]
 use ../integrations/chezmoi.nu [chezmoi-backup chezmoi-restore chezmoi-status chezmoi-verify]
 use ../integrations/bootstrap.nu [bootstrap-outdated bootstrap-status bootstrap-verify]
 use ../integrations/finder.nu [finder-backup finder-enabled finder-reconcile finder-restore finder-status finder-verify]
@@ -269,7 +270,16 @@ export def workflow-backup [
   finder-backup $root $config --dry-run=$dry_run
   tooling-backup $root $config --dry-run=$dry_run
   kopia-backup $config --dry-run=$dry_run
-  if $commit { git-commit $root $config $"Backup (date now | format date '%Y-%m-%d')" --push=$push --dry-run=$dry_run }
+  if $commit {
+    let secrets = (scan-commit-secrets $root)
+    if ($secrets | is-not-empty) {
+      $secrets | table --expand | print
+      fail "Backup refused: changed files look like credentials; remove them, add them to chezmoi encryption, or exclude them from the private state before committing"
+    }
+    let changes = (commit-change-summary $root)
+    if ($changes | is-not-empty) { $changes | table --expand | print }
+    git-commit $root $config $"Backup (date now | format date '%Y-%m-%d')" --push=$push --dry-run=$dry_run
+  }
   info "Backup capture completed; review the source diff"
 }
 

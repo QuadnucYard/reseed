@@ -3,6 +3,7 @@ use ./helpers.nu *
 use ../lib/config.nu [config-fingerprint deep-merge load-config parse-profiles validate-config]
 use ../lib/prelude.nu *
 use ../lib/workflow.nu [workflow-plan workflow-verification-tools]
+use ../lib/secrets.nu [commit-change-summary scan-commit-secrets secret-content-matches secret-name-matches]
 use ../integrations/bootstrap.nu [bootstrap-brew-items bootstrap-outdated bootstrap-tools bootstrap-winget-ids parse-brew-outdated parse-winget-upgrade-table]
 use ../integrations/homebrew.nu [brewfile-items brewfile-summary homebrew-env homebrew-mirror-label homebrew-persist-env homebrew-shell-snippets native-brewfile-items parse-outdated-names]
 use ../integrations/managers/cargo_binstall.nu [cargo-binstall-packages]
@@ -429,6 +430,57 @@ def test-checkpoints [
   assert ne $state_fingerprint $restore_fingerprint "engine changes invalidate restore checkpoints"
 }
 
+# The pre-commit secret guard: high-signal filename and content patterns,
+# plus the repository scan and change summary over a disposable repository.
+def test-secret-guard [
+  engine_root: path # Engine root for disposable git repositories.
+] {
+  assert eq (secret-name-matches "id_ed25519") ["SSH private key"] "SSH private key filename"
+  assert eq (secret-name-matches "id_ed25519_sk") ["SSH private key"] "SSH security-key private filename"
+  assert eq (secret-name-matches "id_rsa.pub") [] "public SSH keys are not credentials"
+  assert eq (secret-name-matches ".git-credentials") ["Git credentials"] "git credentials filename"
+  assert eq (secret-name-matches ".netrc") ["netrc credentials"] "netrc filename"
+  assert eq (secret-name-matches ".pypirc") ["pip credentials"] "pip credentials filename"
+  assert eq (secret-name-matches "credentials") ["generic credentials"] "generic credentials filename"
+  assert eq (secret-name-matches ".env") ["environment file"] "dotenv filename"
+  assert eq (secret-name-matches ".env.production") ["environment file"] "environment filename"
+  assert eq (secret-name-matches "gitconfig") [] "ordinary config filenames pass"
+  assert ("private key" in (secret-content-matches "-----BEGIN OPENSSH PRIVATE KEY-----\nabc123")) "OpenSSH private key content"
+  assert ("private key" in (secret-content-matches "-----BEGIN PGP PRIVATE KEY BLOCK-----")) "PGP private key content"
+  assert ("private key" in (secret-content-matches "-----BEGIN PRIVATE KEY-----\nabc123")) "PKCS8 private key content"
+  # Token payloads are assembled from fragments so no credential-shaped
+  # literal appears in the repository (GitHub push protection scans diffs).
+  let payload36 = "123456789012345678901234567890123456"
+  assert ("GitHub token" in (secret-content-matches ("gh" + "p_" + $payload36))) "GitHub token content"
+  assert ("GitHub fine-grained token" in (secret-content-matches ("github_" + "pat_" + "1234567890123456789abcdefg"))) "GitHub fine-grained token content"
+  assert ("AWS access key" in (secret-content-matches ("AK" + "IA" + "1234567890ABCDEF"))) "AWS access key content"
+  assert ("Google API key" in (secret-content-matches ("AI" + "za" + "12345678901234567890123456789012345"))) "Google API key content"
+  assert ("Slack token" in (secret-content-matches ("xox" + "b-" + "1234567890-abcdefghij"))) "Slack token content"
+  assert ("Stripe secret key" in (secret-content-matches ("sk" + "_live_" + "123456789012345678901234"))) "Stripe secret key content"
+  assert ("GitLab personal access token" in (secret-content-matches ("gl" + "pat-" + "abcdefghijklmnopqrstuvwxyz1234567890"))) "GitLab token content"
+  assert ("npm access token" in (secret-content-matches ("np" + "m_" + $payload36))) "npm token content"
+  assert eq (secret-content-matches "nothing secret here") [] "clean content passes"
+
+  if not (command-exists git) { return }
+  let scan_root = ($engine_root | path join "tests" $".reseed-secret-test-(random uuid)")
+  mkdir $scan_root
+  run-command git ["-C" $scan_root "init" "-b" "main" "-q"] --quiet | ignore
+  "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAAB3NzaC1yc2E" | save --force ($scan_root | path join "id_ed25519")
+  ("export GH_TOKEN=" + "gh" + "p_" + $payload36) | save --force ($scan_root | path join ".env")
+  0x[00 FF 00 01] | save --raw --force ($scan_root | path join "blob.bin")
+  "[user]\nname = Test" | save --force ($scan_root | path join ".gitconfig")
+  run-command git ["-C" $scan_root "add" "--all"] --quiet | ignore
+  let secrets = (scan-commit-secrets $scan_root)
+  assert (($secrets | any {|match| $match.pattern == "SSH private key" })) "repository scan finds SSH private key files"
+  assert (($secrets | any {|match| $match.pattern == "environment file" })) "repository scan finds environment files"
+  assert (($secrets | any {|match| $match.pattern == "GitHub token" })) "repository scan finds token content"
+  assert (not ($secrets | any {|match| ($match.path | str contains ".gitconfig") })) "repository scan ignores clean config files"
+  assert (not ($secrets | any {|match| ($match.path | str contains "blob.bin") })) "repository scan skips binary files"
+  let summary = (commit-change-summary $scan_root)
+  assert (($summary | any {|entry| ($entry.path | str contains "id_ed25519") and $entry.size > 0B })) "commit summary lists changed files with sizes"
+  rm --recursive --force $scan_root
+}
+
 def main [] {
   let engine_root = ($env.FILE_PWD | path dirname)
   let state_root = ($engine_root | path join "templates" "state")
@@ -443,6 +495,7 @@ def main [] {
   test-homebrew-env $state_root
   test-homebrew-shell-snippets $state_root
   test-workflow-plan $state_root
+  test-secret-guard $engine_root
   test-tooling-observations $engine_root $state_root
   test-mise-commands $state_root
   test-mise-backends $engine_root $state_root
