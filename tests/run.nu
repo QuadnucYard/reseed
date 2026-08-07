@@ -36,7 +36,7 @@ def test-config-layer [
   let config = (load-config $state_root [personal])
   assert eq $config.active_profiles [personal] "active profile recording"
   assert ((validate-config $state_root $config) | is-empty) "state template validates"
-  let without_setup = ($config | reject setup)
+  let without_setup = ($config | reject --optional setup)
   assert ((validate-config $state_root $without_setup) | is-empty) "configs without a setup section validate"
 }
 

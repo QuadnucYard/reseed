@@ -27,14 +27,14 @@ export def node-spec-parse [
   let scoped = ($spec | parse --regex '^(?<name>@[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*)(?:@(?<version>[A-Za-z0-9][A-Za-z0-9.+_-]*))?$')
   if not ($scoped | is-empty) {
     let row = ($scoped | first)
-    return {name: ($row.name | str downcase) version: ($row | get -o version | default null)}
+    return {name: ($row.name | str lowercase) version: ($row | get -o version | default null)}
   }
   let unscoped = ($spec | parse --regex '^(?<name>[A-Za-z0-9][A-Za-z0-9._-]*)(?:@(?<version>[A-Za-z0-9][A-Za-z0-9.+_-]*))?$')
   if ($unscoped | is-empty) {
     null
   } else {
     let row = ($unscoped | first)
-    {name: ($row.name | str downcase) version: ($row | get -o version | default null)}
+    {name: ($row.name | str lowercase) version: ($row | get -o version | default null)}
   }
 }
 
@@ -46,7 +46,7 @@ export def node-package-record [
 ]: nothing -> record {
   let parsed = (node-spec-parse $spec)
   if $parsed == null {
-    return {spec: $spec name: ($spec | str downcase) version: null commands: ($commands | uniq)}
+    return {spec: $spec name: ($spec | str lowercase) version: null commands: ($commands | uniq)}
   }
   {
     spec: $spec
@@ -214,7 +214,7 @@ def parse-dependency-inventory [parsed: any]: nothing -> list<record> {
         } else {
           null
         }
-        $packages = ($packages | append {name: ($item.key | str downcase) version: $version})
+        $packages = ($packages | append {name: ($item.key | str lowercase) version: $version})
       }
     }
   }

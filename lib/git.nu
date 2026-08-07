@@ -121,7 +121,7 @@ export def git-commit [
 # release assets do: amd64 on 64-bit Windows, arm64 on Apple Silicon.
 def bundle-platform []: nothing -> string {
   let os = (detect-os)
-  let arch = ($nu.os-info.arch | str downcase)
+  let arch = ($nu.os-info.arch | str lowercase)
   let normalized = if $os == "windows" and $arch == "x86_64" {
     "amd64"
   } else if $os == "macos" and $arch == "aarch64" {

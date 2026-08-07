@@ -4,7 +4,7 @@
 # Name of the current platform, normalized to lowercase ("windows", "macos",
 # or the raw OS name for anything else).
 export def detect-os []: nothing -> string {
-  let name = ($nu.os-info.name | str downcase)
+  let name = ($nu.os-info.name | str lowercase)
   if $name == "windows" { "windows" } else if $name == "macos" { "macos" } else { $name }
 }
 
@@ -143,7 +143,7 @@ export def confirm [
   --yes # Accept without asking.
 ]: nothing -> bool {
   if $yes { return true }
-  let answer = (input $"($message) [y/N] " | str trim | str downcase)
+  let answer = (input $"($message) [y/N] " | str trim | str lowercase)
   $answer in ["y" "yes"]
 }
 

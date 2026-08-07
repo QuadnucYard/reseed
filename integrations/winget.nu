@@ -79,7 +79,7 @@ export def winget-update [
       "upgrade" "--id" $id "--exact" "--accept-source-agreements"
       "--accept-package-agreements" "--disable-interactivity"
     ] --dry-run=$dry_run --allow-failure)
-    if ($result.exit_code != 0) and not (($result.stdout | str downcase) =~ 'no applicable upgrade|no available upgrade|no installed package') {
+    if ($result.exit_code != 0) and not (($result.stdout | str lowercase) =~ 'no applicable upgrade|no available upgrade|no installed package') {
       warning $"WinGet could not update ($id): ($result.stderr | str trim)"
     }
   }

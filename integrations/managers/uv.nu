@@ -23,7 +23,7 @@ export def uv-spec-parse [
     null
   } else {
     let row = ($parsed | first)
-    {name: ($row.name | str downcase) version: ($row | get -o version | default null)}
+    {name: ($row.name | str lowercase) version: ($row | get -o version | default null)}
   }
 }
 
@@ -34,7 +34,7 @@ export def uv-package-record [
 ]: nothing -> record {
   let parsed = (uv-spec-parse $spec)
   if $parsed == null {
-    return {spec: $spec name: ($spec | str downcase) version: null commands: ($commands | uniq)}
+    return {spec: $spec name: ($spec | str lowercase) version: null commands: ($commands | uniq)}
   }
   {
     spec: $spec
@@ -115,7 +115,7 @@ export def parse-uv-inventory [output: string]: nothing -> list<record> {
         null
       } else {
         let row = ($parsed | first)
-        {name: ($row.name | str downcase) version: $row.version}
+        {name: ($row.name | str lowercase) version: $row.version}
       }
     }
     | compact
