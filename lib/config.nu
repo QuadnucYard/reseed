@@ -146,7 +146,27 @@ def validate-software [
       }
     }
   }
+  let finder = ($software.finder_services? | default null)
+  if $finder != null {
+    if (($finder | describe) !~ '^record') {
+      $issues = ($issues | append {level: error area: finder message: "software.finder_services must be a record with an enabled boolean"})
+    } else {
+      $issues = ($issues | append (validate-finder-settings $finder))
+    }
+  }
   $issues
+}
+
+# Validate the finder_services settings: the optional enabled flag must be a
+# boolean. The section is absent by default and defaults to enabled.
+def validate-finder-settings [
+  settings: record # Finder services settings.
+]: nothing -> list<record> {
+  let enabled = ($settings.enabled? | default null)
+  if $enabled != null and (($enabled | describe) != "bool") {
+    return [{level: error area: finder message: "software.finder_services.enabled must be a boolean"}]
+  }
+  []
 }
 
 # Validate the Homebrew settings: the optional env record (used to route
@@ -476,5 +496,8 @@ def fingerprint-engine-files [
   for directory in [lib integrations] {
     $files = ($files | append (fingerprint-directory-files ($engine_root | path join $directory)))
   }
+  # Platform feature templates (e.g. the macOS Finder Quick Actions) affect
+  # what restore writes, so they belong to the engine fingerprint too.
+  $files = ($files | append (fingerprint-directory-files ($engine_root | path join "templates" "macos")))
   $files
 }

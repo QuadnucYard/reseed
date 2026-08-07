@@ -168,6 +168,14 @@ the same environment. Nushell and Fish load them automatically; POSIX and
 PowerShell users source `~/.local/share/reseed/shell/reseed-homebrew-env.sh`
 (or `.ps1`) from their profile, exactly like the managed-tools adapters.
 
+On macOS the restore also installs Finder context-menu items as Automator
+Quick Actions: "Open Terminal Here" opens the frontmost Finder window's
+folder in a terminal, and two "Open in VS Code" entries act on exclusive
+contexts — the frontmost Finder window's folder and the right-clicked
+selection. They can be managed directly with `reseed finder status|restore|verify`
+and disabled with `software.finder_services.enabled: false` in
+`recovery.nuon`. See [docs/finder.md](docs/finder.md).
+
 When the bootstrap contract tools (Git, chezmoi, Nushell, mise) are already
 installed, the bootstrap checks them for available upgrades: on an interactive
 terminal it prompts before upgrading anything, while non-interactive runs

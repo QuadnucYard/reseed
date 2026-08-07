@@ -66,6 +66,12 @@ builders — lives in `lib/manager_core.nu`.
 | `chezmoi.nu` | Dotfile restore (`diff` then `apply`), backup (`re-add`), and verification against the private source |
 | `kopia.nu` | Explicit snapshot/restore entries with `~` expansion; repository credentials stay external |
 
+## macOS Finder context menu
+
+| Module | Purpose |
+| --- | --- |
+| `finder.nu` | Generates three Automator Quick Actions into `~/Library/Services` on macOS: "Open Terminal Here" opens the frontmost Finder window's folder in a terminal, and two "Open in VS Code" entries act on exclusive contexts — the frontmost Finder window's folder and the right-clicked selection. Gated by `software.finder_services.enabled` (defaults to on); backup is a no-op because the bundles are generated from the engine templates. See [docs/finder.md](../docs/finder.md) |
+
 ## Adding an integration
 
 1. Create one module with the contract functions above. Package managers go

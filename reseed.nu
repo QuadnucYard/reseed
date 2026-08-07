@@ -4,6 +4,7 @@ use lib/config.nu [load-config parse-profiles]
 use lib/core.nu [expand-home]
 use lib/setup.nu [setup-wizard]
 use lib/workflow.nu [workflow-backup workflow-bundle workflow-init workflow-plan workflow-reconcile workflow-restore workflow-status workflow-update workflow-verify]
+use integrations/finder.nu [finder-restore finder-status finder-verify]
 
 # Absolute path of the directory containing this engine.
 def engine-root []: nothing -> path {
@@ -104,7 +105,7 @@ def "main update" [
 ] {
   let state = (resolved-state-root $state_root)
   let selected = (parse-profiles $profiles)
-  workflow-update $state (load-config $state $selected) $selected --yes=$yes --dry-run=$dry_run
+  workflow-update (engine-root) $state (load-config $state $selected) $selected --yes=$yes --dry-run=$dry_run
 }
 
 # Compare desired software with installed software without changing either.
@@ -221,4 +222,37 @@ def "main setup gpg" [
 ] {
   let state = (resolved-state-root $state_root)
   setup-wizard $state (resolved-config $state $profiles) gpg --yes=$yes --dry-run=$dry_run --no-jj=$no_jj
+}
+
+# Manage the macOS Finder context-menu services (status, restore, verify).
+def "main finder" [] {
+  help "main finder"
+}
+
+# Show whether the macOS Finder context-menu services are installed.
+def "main finder status" [
+  --profiles (-p): string = "" # Comma-separated profiles; defaults to those configured in recovery.nuon.
+  --state-root (-s): string = "" # Private state directory; overrides RESEED_STATE_ROOT and ~/.local/share/reseed.
+] {
+  let state = (resolved-state-root $state_root)
+  finder-status $state (resolved-config $state $profiles) | table --expand | print
+}
+
+# Install or refresh the macOS Finder context-menu services.
+def "main finder restore" [
+  --profiles (-p): string = "" # Comma-separated profiles; defaults to those configured in recovery.nuon.
+  --state-root (-s): string = "" # Private state directory; overrides RESEED_STATE_ROOT and ~/.local/share/reseed.
+  --dry-run # Show the writes and the Finder restart without changing files.
+] {
+  let state = (resolved-state-root $state_root)
+  finder-restore (engine-root) $state (resolved-config $state $profiles) --dry-run=$dry_run
+}
+
+# Verify the installed macOS Finder context-menu services.
+def "main finder verify" [
+  --profiles (-p): string = "" # Comma-separated profiles; defaults to those configured in recovery.nuon.
+  --state-root (-s): string = "" # Private state directory; overrides RESEED_STATE_ROOT and ~/.local/share/reseed.
+] {
+  let state = (resolved-state-root $state_root)
+  finder-verify $state (resolved-config $state $profiles) | table --expand | print
 }

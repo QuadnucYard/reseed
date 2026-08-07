@@ -8,6 +8,7 @@ use state.nu [complete-stage fail-stage load-checkpoint stage-done]
 use git.nu [git-bundle git-commit git-init git-pull git-status]
 use ../integrations/chezmoi.nu [chezmoi-backup chezmoi-restore chezmoi-status chezmoi-verify]
 use ../integrations/bootstrap.nu [bootstrap-outdated bootstrap-status bootstrap-verify]
+use ../integrations/finder.nu [finder-backup finder-enabled finder-reconcile finder-restore finder-status finder-verify]
 use ../integrations/homebrew.nu [homebrew-backup homebrew-persist-env homebrew-reconcile homebrew-restore homebrew-status homebrew-update homebrew-verify]
 use ../integrations/kopia.nu [kopia-backup kopia-restore kopia-status kopia-verify]
 use ../integrations/mise.nu [mise-reconcile mise-restore mise-status mise-update mise-verify]
@@ -21,7 +22,7 @@ export def workflow-verification-tools [
   --skip-software # Exclude native packages and mise-managed tools.
 ]: nothing -> list<string> {
   let software = if $skip_software { [] } else { [winget homebrew mise] }
-  [bootstrap] | append $software | append [chezmoi kopia]
+  [bootstrap] | append $software | append [chezmoi kopia finder]
 }
 
 # Directory of the generic state template shipped with the engine.
@@ -97,9 +98,10 @@ export def workflow-plan [
   [
     {order: 1 stage: system-packages enabled: ((not $skip_software) and (($os == "windows" and $winget.enabled) or ($os == "macos" and $brew.enabled))) owner: (if $os == "windows" { "winget" } else if $os == "macos" { "homebrew" } else { "unsupported" })}
     {order: 2 stage: portable-tools enabled: ((not $skip_software) and $mise.enabled) owner: mise}
-    {order: 3 stage: configuration enabled: $chezmoi.enabled owner: chezmoi}
-    {order: 4 stage: snapshots enabled: ($kopia.enabled and ($kopia.restores > 0)) owner: kopia}
-    {order: 5 stage: verification enabled: true owner: reseed}
+    {order: 3 stage: macos-finder enabled: (($os == "macos") and (finder-enabled $config)) owner: finder}
+    {order: 4 stage: configuration enabled: $chezmoi.enabled owner: chezmoi}
+    {order: 5 stage: snapshots enabled: ($kopia.enabled and ($kopia.restores > 0)) owner: kopia}
+    {order: 6 stage: verification enabled: true owner: reseed}
   ]
 }
 
@@ -130,6 +132,7 @@ export def workflow-status [
     (chezmoi-status $root $config)
     (winget-status $root $config)
     (homebrew-status $root $config)
+    (finder-status $root $config)
     (mise-status $root $config)
     (kopia-status $config)
     ({tool: git enabled: true applicable: true available: $git.available repository: $git.repository clean: $git.clean})
@@ -221,6 +224,11 @@ export def workflow-restore [
       mise-restore $root $config --dry-run=$dry_run
     } --dry-run=$dry_run)
   }
+  # The macOS Finder context-menu services are machine configuration, so they
+  # are restored even for offline (configuration-only) recovery.
+  $checkpoint = (execute-stage $config $checkpoint macos-finder {
+    finder-restore $engine_root $root $config --dry-run=$dry_run
+  } --dry-run=$dry_run)
   # Keep interactive Homebrew usage on the configured mirrors, outside of
   # Reseed runs, by regenerating the shell snippets from the loaded config.
   homebrew-persist-env $config --dry-run=$dry_run
@@ -258,6 +266,7 @@ export def workflow-backup [
   chezmoi-backup $root $config --dry-run=$dry_run
   winget-backup $root $config --refresh-manifests=$refresh_manifests --dry-run=$dry_run
   homebrew-backup $root $config --refresh-manifests=$refresh_manifests --dry-run=$dry_run
+  finder-backup $root $config --dry-run=$dry_run
   tooling-backup $root $config --dry-run=$dry_run
   kopia-backup $config --dry-run=$dry_run
   if $commit { git-commit $root $config $"Backup (date now | format date '%Y-%m-%d')" --push=$push --dry-run=$dry_run }
@@ -268,6 +277,7 @@ export def workflow-backup [
 # verify the result. The configuration is reloaded after the pull so updates
 # honor the freshly pulled desired state.
 export def workflow-update [
+  engine_root: path # Engine directory (template source for engine-owned artifacts).
   root: path # Private state root.
   config: record # Loaded configuration (pre-pull).
   profiles: list<string> # Profile names to reload after the pull.
@@ -284,6 +294,7 @@ export def workflow-update [
   homebrew-update $root $effective --dry-run=$dry_run
   homebrew-persist-env $effective --dry-run=$dry_run
   mise-update $root $effective --dry-run=$dry_run
+  finder-restore $engine_root $root $effective --dry-run=$dry_run
   chezmoi-restore $root $effective --dry-run=$dry_run
   if $dry_run { info "would run verification checks" } else { workflow-verify $root $effective }
   info "Managed update completed"
@@ -307,6 +318,8 @@ export def workflow-reconcile [
   $native | table --expand | print
   let portable = (mise-reconcile $root $config --dry-run=$dry_run)
   if ($portable | is-not-empty) { $portable | table --expand | print }
+  let finder = (finder-reconcile $root $config --dry-run=$dry_run)
+  if ($finder.applicable) { $finder | table --expand | print }
   let native_tools = (tooling-observe $root $config --dry-run=$dry_run)
   if ($native_tools | is-not-empty) { $native_tools | table --expand | print }
   info "Reconcile is report-only; desired state was not changed"
@@ -324,6 +337,7 @@ export def workflow-verify [
       bootstrap => (bootstrap-verify --skip-software=$skip_software)
       winget => (winget-verify $root $config)
       homebrew => (homebrew-verify $root $config)
+      finder => (finder-verify $root $config)
       mise => (mise-verify $root $config)
       chezmoi => (chezmoi-verify $root $config)
       kopia => (kopia-verify $config)

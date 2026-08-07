@@ -44,6 +44,7 @@ jobs:
       - name: Run test suite
         run: |
           nu tests/run.nu
+          nu tests/finder.nu
           nu tests/setup.nu
 
       - name: CLI smoke test

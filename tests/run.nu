@@ -217,12 +217,12 @@ def test-workflow-plan [
 ] {
   let config = (load-config $state_root [personal])
   let plan = (workflow-plan $state_root $config)
-  assert eq ($plan.stage) [system-packages portable-tools configuration snapshots verification] "restore dependency order"
-  assert eq ($plan.order) [1 2 3 4 5] "restore ordering is stable"
+  assert eq ($plan.stage) [system-packages portable-tools macos-finder configuration snapshots verification] "restore dependency order"
+  assert eq ($plan.order) [1 2 3 4 5 6] "restore ordering is stable"
   let offline_plan = (workflow-plan $state_root $config --skip-software)
   assert eq ($offline_plan.enabled | first 2) [false false] "configuration-only restore skips software"
-  assert eq (workflow-verification-tools) [bootstrap winget homebrew mise chezmoi kopia] "full verification scope"
-  assert eq (workflow-verification-tools --skip-software) [bootstrap chezmoi kopia] "offline verification scope"
+  assert eq (workflow-verification-tools) [bootstrap winget homebrew mise chezmoi kopia finder] "full verification scope"
+  assert eq (workflow-verification-tools --skip-software) [bootstrap chezmoi kopia finder] "offline verification scope"
 }
 
 # Tool observation: dry-run behavior, filenames, and the unknown-manager

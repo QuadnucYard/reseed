@@ -80,6 +80,13 @@
       update: true
       restore_tasks: [reseed:shells]
     }
+    finder_services: {
+      # macOS Finder context menu (Quick Actions): "Open Terminal Here" opens
+      # the frontmost Finder window's folder in a terminal, and two "Open in
+      # VS Code" entries act on exclusive contexts — the frontmost window's
+      # folder and the right-clicked selection.
+      enabled: true
+    }
   }
   kopia: {
     enabled: false
