@@ -119,7 +119,7 @@ rust = ["stable", "nightly"]
 starship = "latest"
 "aqua:pnpm/pnpm" = "latest"
 "aqua:astral-sh/uv" = "latest"
-"cargo:cargo-binstall" = "latest"
+"aqua:cargo-bins/cargo-binstall" = "latest"
 "npm:opencode-ai" = "latest"
 ```
 
@@ -133,8 +133,9 @@ complete mise configuration.
 Leave a version unpinned for the latest release. Use an exact mise version when
 reproducibility requires it. Do not put uv tools, pnpm globals, Yarn globals,
 Bun globals, or individual Cargo binary crates in `[tools]`; use their manager
-manifests instead. The
-special `cargo:cargo-binstall` entry is the only Cargo bootstrap in `[tools]`.
+manifests instead. Cargo-binstall is the exception: it is a bootstrap tool
+installed from a prebuilt binary (`aqua:cargo-bins/cargo-binstall`), never via
+the `cargo:*` backend, so it does not depend on the Rust toolchain.
 
 The example's `ruff` is declared in `packages/uv/tools.nuon`, and
 `@biomejs/biome` is declared in `packages/node/pnpm/global.nuon`. Package

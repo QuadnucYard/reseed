@@ -8,7 +8,7 @@ node = "latest"
 "aqua:astral-sh/uv" = "latest"
 # Keep only the Cargo-binstall bootstrap here when cargo_binstall is enabled.
 # Cargo binary crates belong in packages/cargo/binstall.nuon.
-# "cargo:cargo-binstall" = "latest"
+# "aqua:cargo-bins/cargo-binstall" = "latest"
 # node = "latest"
 # python = "latest"
 # uv tools belong in packages/uv/tools.nuon.
