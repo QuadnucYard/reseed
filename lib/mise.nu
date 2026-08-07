@@ -120,6 +120,9 @@ export def mise-manager-config [
   let settings = $config.software.mise? | default {}
   let configs = ($settings.configs? | default [])
   let relative = ($settings.manager_config? | default (if ($configs | is-empty) { "" } else { $configs | first }))
+  if ($relative | describe) != "string" {
+    error make {msg: "Mise manager_config must be a string when set"}
+  }
   if ($relative | str trim | is-empty) {
     error make {msg: "A mise manager_config or at least one mise config is required"}
   }
@@ -131,4 +134,31 @@ export def mise-manager-config [
     error make {msg: $"Mise manager_config does not exist: ($relative)"}
   }
   $selected
+}
+
+# Resolve the mise config exposed to interactive shells. It defaults to the
+# manager config but remains an explicit selection so additional role or
+# environment configs do not accidentally become global.
+export def mise-shell-config [
+  root: path # Private state root.
+  config: record # Loaded configuration.
+]: nothing -> path {
+  let settings = $config.software.mise
+  let configs = ($settings.configs? | default [])
+  let manager = ($settings.manager_config? | default (if ($configs | is-empty) { "" } else { $configs | first }))
+  let relative = ($settings.shell_config? | default $manager)
+  if ($relative | describe) != "string" {
+    error make {msg: "Mise shell_config must be a string when set"}
+  }
+  if ($relative | str trim | is-empty) {
+    error make {msg: "A mise shell_config, manager_config, or at least one mise config is required"}
+  }
+  if $relative not-in $configs {
+    error make {msg: $"Mise shell_config '($relative)' must be one of the selected configs: (($configs | str join ', '))"}
+  }
+  let selected = ($root | path join $relative)
+  if not ($selected | path exists) {
+    error make {msg: $"Mise shell_config does not exist: ($relative)"}
+  }
+  $selected | path expand --no-symlink
 }

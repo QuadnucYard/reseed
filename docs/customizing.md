@@ -29,9 +29,26 @@ Starship follows this model:
 
 Shell syntax is different, so activation cannot be one literal file. The
 configuration and ownership remain unified, while generated initialization
-code stays outside Git and is recreated after `mise install`. Nushell and Fish
-load their generated adapters automatically; PowerShell and POSIX shells use
-the generated profile snippets from `~/.local/share/reseed/shell/`.
+code stays outside Git and is recreated after chezmoi applies the home state.
+Nushell and Fish load their generated adapters automatically. Separate Bash,
+Zsh, and PowerShell adapters live under `~/.local/share/reseed/shell/`.
+Reseed installs a replaceable marker block into unmanaged `.bashrc`, `.zshrc`,
+and PowerShell profiles. When chezmoi manages one of those profiles, add the
+adapter source line to the chezmoi source instead; restore refuses to create
+target-only drift. Use the portable adapter names under
+`$HOME/.local/share/reseed/shell/`: `reseed-managed-tools.bash`,
+`reseed-managed-tools.zsh`, or `reseed-managed-tools.ps1`.
+
+`software.mise.shell_config` selects the one configured mise file exposed as
+the global config (`MISE_GLOBAL_CONFIG_FILE`); it defaults to
+`manager_config`. Reseed passes its absolute path to the generator, so
+`--state-root` and `RESEED_STATE_ROOT` remain effective. Additional
+`mise.<environment>.toml` files stay opt-in through mise environments rather
+than becoming global accidentally. The adapters activate mise last, ahead of
+the shared manager bin and the deduplicated `$CARGO_HOME/bin` rustup fallback
+(`~/.cargo/bin` by default).
+On macOS they also persist the detected Homebrew `bin` and `sbin` paths before
+looking up mise.
 
 Nushell's main configuration is platform-specific: `%APPDATA%\nushell` on
 Windows and `~/Library/Application Support/nushell` on macOS. Add the actual
@@ -98,7 +115,8 @@ environment per command, so removing the block restores official sources.
 To keep the mirror active in interactive shells (outside Reseed), every
 `reseed restore` and `reseed update` also regenerates snippets from this
 environment: `reseed-homebrew-env.nu` in the Nushell vendor autoload and
-`reseed-homebrew-env.fish` in `~/.config/fish/conf.d/` are loaded
+`reseed-homebrew-env.fish` in `$XDG_CONFIG_HOME/fish/conf.d/` (or
+`~/.config/fish/conf.d/` by default) are loaded
 automatically by their shells, while
 `~/.local/share/reseed/shell/reseed-homebrew-env.sh` (POSIX) and
 `reseed-homebrew-env.ps1` (PowerShell) are sourced from a profile. Removing
@@ -168,10 +186,15 @@ Yarn 1, which still ships the `yarn global` commands; pin it explicitly, for
 example `yarn = "1.22.22"`.
 
 Manager execution uses the selected `manager_config` and `mise exec`, so a
-clean process does not need mise shims on its inherited `PATH`. uv and the
-Node package managers write command shims to `~/.local/share/reseed/bin`; the
-post-restore shell task generates the supported shell adapters for that
-directory.
+clean process does not need mise shims on its inherited `PATH`. uv, the Node
+package managers, and Cargo-binstall write commands to
+`~/.local/share/reseed/bin`; the post-chezmoi `shell_task` generates the
+supported adapters for that directory. Interactive shells get the
+mise-managed tools themselves through the same adapters; `shell_config`
+selects the global file and mise is activated per shell (see "Shared shell
+configuration"). The rustup fallback follows `CARGO_HOME` (defaulting to
+`~/.cargo`), and Fish autoload placement follows `XDG_CONFIG_HOME` (defaulting
+to `~/.config`).
 
 ## Profiles
 
@@ -182,6 +205,12 @@ manifest order and mise task order deterministic.
 Mise configuration paths must be named `mise.toml` or
 `mise.<environment>.toml`. Reseed maps the latter to mise's native `-E`
 environment option instead of inventing its own tool-overlay semantics.
+`manager_config` selects the config used for package-manager commands, while
+`shell_config` selects the config activated globally. Both must be members of
+`configs`. `shell_task` is separate from `restore_tasks` because it runs after
+chezmoi; other restore tasks remain in the portable-tools stage. Existing
+state repositories that still list `reseed:shells` in `restore_tasks` are
+recognized and scheduled after chezmoi automatically.
 
 Use profiles for roles such as `personal`, `work`, or `studio`. Platform
 selection is automatic, so a profile can be used on both Windows and macOS.

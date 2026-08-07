@@ -60,9 +60,11 @@ Homebrew Cellar/cache, WinGet caches, drivers, registry hives, DPAPI blobs, or
 project build outputs.
 
 Do not back up `~/.local/share/reseed/bin/` or its generated shell adapters;
-these are recreated from `UV_TOOL_BIN_DIR`, `PNPM_HOME`, and the
-`reseed:shells` task. Generate completions and Nushell vendor autoload files
-from managed tools.
+these are recreated from the manager install-root variables and the configured
+`shell_task`. Generated Bash, Zsh, PowerShell, Fish, and Nushell files remain
+machine state; only authored loader lines in chezmoi-managed profiles belong
+in the private repository. Generate completions and Nushell vendor autoload
+files from managed tools.
 Use native browser/editor sync for data already owned there. Use Kopia only for
 narrow, valuable application databases that cannot be represented
 declaratively, and define how the restore snapshot is selected before enabling

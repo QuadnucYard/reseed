@@ -259,10 +259,24 @@ def validate-mise [
   mut issues = []
   let manager_config = ($settings.manager_config? | default (if (($settings.configs? | default []) | is-empty) { "" } else { $settings.configs | first }))
   let configured_configs = ($settings.configs? | default [])
-  if ($manager_config | str trim | is-empty) {
+  if ($manager_config | describe) != "string" {
+    $issues = ($issues | append {level: error area: mise message: "software.mise.manager_config must be a string when set"})
+  } else if ($manager_config | str trim | is-empty) {
     $issues = ($issues | append {level: error area: mise message: "manager_config or at least one mise config is required"})
   } else if $manager_config not-in $configured_configs {
     $issues = ($issues | append {level: error area: mise message: $"Mise manager_config '($manager_config)' must be one of the selected configs: (($configured_configs | str join ', '))"})
+  }
+  let shell_config = ($settings.shell_config? | default $manager_config)
+  if ($shell_config | describe) != "string" {
+    $issues = ($issues | append {level: error area: mise message: "software.mise.shell_config must be a string when set"})
+  } else if ($shell_config | str trim | is-empty) {
+    $issues = ($issues | append {level: error area: mise message: "shell_config, manager_config, or at least one mise config is required"})
+  } else if $shell_config not-in $configured_configs {
+    $issues = ($issues | append {level: error area: mise message: $"Mise shell_config '($shell_config)' must be one of the selected configs: (($configured_configs | str join ', '))"})
+  }
+  let shell_task = ($settings.shell_task? | default null)
+  if $shell_task != null and ((($shell_task | describe) != "string") or (($shell_task | str trim) | is-empty)) {
+    $issues = ($issues | append {level: error area: mise message: "software.mise.shell_task must be a non-empty string when set"})
   }
   # Backend dependencies are only checked when every config file exists;
   # missing files are already reported by validate-desired-files.

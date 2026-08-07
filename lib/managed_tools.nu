@@ -20,6 +20,7 @@ export def managed-tool-environment []: nothing -> record {
     UV_TOOL_BIN_DIR: $directory
     YARN_PREFIX: $root
     BUN_INSTALL: $root
+    CARGO_INSTALL_ROOT: $root
   }
 }
 

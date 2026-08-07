@@ -25,6 +25,8 @@ run = "nu --no-config-file scripts/configure-shells.nu"
 # Direct-manager exceptions can remain durable without another manifest format.
 # Add the required runtime above, define an idempotent task here, then list the
 # task under software.mise.restore_tasks in config/recovery.nuon or a profile.
+# Shell initialization is the separate software.mise.shell_task because it
+# runs after chezmoi applies profile files.
 # [tasks."restore:pnpm-exceptions"]
 # run = "pnpm add --global some-package@latest"
 # [tasks."restore:bun-exceptions"]

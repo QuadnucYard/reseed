@@ -6,13 +6,25 @@ use ../lib/workflow.nu [workflow-plan workflow-verification-tools]
 use ../lib/secrets.nu [commit-change-summary scan-commit-secrets secret-content-matches secret-name-matches]
 use ../integrations/bootstrap.nu [bootstrap-brew-items bootstrap-outdated bootstrap-tools bootstrap-winget-ids parse-brew-outdated parse-winget-upgrade-table]
 use ../integrations/homebrew.nu [brewfile-items brewfile-summary homebrew-env homebrew-mirror-label homebrew-persist-env homebrew-shell-snippets native-brewfile-items parse-outdated-names]
-use ../integrations/managers/cargo_binstall.nu [cargo-binstall-packages]
-use ../integrations/mise.nu [mise-install-plan mise-reconcile]
+use ../integrations/managers/cargo_binstall.nu [cargo-binstall-args cargo-binstall-packages]
+use ../integrations/mise.nu [mise-install-plan mise-reconcile mise-shell-task mise-shell-task-environment]
 use ../integrations/managers/node/node_manager.nu [node-manager-entries node-manager-install-args node-manager-missing-packages node-manager-update-args node-package-record node-spec-parse node-yarn-major-version parse-bun-inventory parse-node-dependency-inventory parse-yarn-inventory]
 use ../integrations/managers/node/pnpm.nu [parse-pnpm-inventory pnpm-missing-packages pnpm-package-record pnpm-packages]
 use ../integrations/tooling.nu [tooling-observe]
 use ../integrations/managers/uv.nu [parse-uv-inventory uv-entries uv-missing-packages uv-package-record uv-packages uv-spec-parse]
 use ../integrations/winget.nu [native-winget-manifest-ids winget-manifest-ids]
+
+def with-temp-dir [template: string body: closure] {
+  let sandbox = (mktemp --directory --tmpdir $template)
+  try {
+    let result = (do $body $sandbox)
+    rm --recursive --force $sandbox
+    $result
+  } catch {|err|
+    rm --recursive --force $sandbox
+    error make $err
+  }
+}
 
 # Configuration loading: deep merge, profile parsing, command display and
 # URL redaction, missing-command capture, and template validation.
@@ -44,6 +56,12 @@ def test-config-layer [
   let success_captured = (run-command nu ["-c" "print hi"] --allow-failure --quiet --capture)
   assert eq ($success_captured.stdout | str trim) "hi" "captured commands collect stdout"
   let config = (load-config $state_root [personal])
+  assert eq (mise-shell-task $config.software.mise) "reseed:shells" "explicit shell task selection"
+  let shell_environment = (mise-shell-task-environment $state_root $config)
+  assert eq $shell_environment.MISE_GLOBAL_CONFIG_FILE (($state_root | path join "mise.toml") | path expand --no-symlink | into string) "shell task pins mise global config"
+  assert eq $shell_environment.RESEED_MISE_CONFIG_FILE $shell_environment.MISE_GLOBAL_CONFIG_FILE "shell task propagates selected config"
+  let legacy_settings = ($config.software.mise | reject shell_task | upsert restore_tasks ["reseed:shells" "reseed:other"])
+  assert eq (mise-shell-task $legacy_settings) "reseed:shells" "legacy shell task selection"
   assert eq $config.active_profiles [personal] "active profile recording"
   assert ((validate-config $state_root $config) | is-empty) "state template validates"
   let without_setup = ($config | reject --optional setup)
@@ -219,12 +237,17 @@ def test-homebrew-shell-snippets [
   ] "snippet filenames"
   assert (($snippets | get path | any {|path| ($path | path dirname | path basename) == "autoload" })) "Nushell snippet uses the vendor autoload"
   assert (($snippets | get path | any {|path| ($path | path dirname | path basename) == "conf.d" })) "Fish snippet uses conf.d"
+  with-temp-dir "reseed-xdg-test.XXXXXXXX" {|xdg_config_home|
+    let xdg_snippets = (with-env {XDG_CONFIG_HOME: $xdg_config_home} { homebrew-shell-snippets $mirrored })
+    let fish_path = ($xdg_snippets | get path | where {|path| ($path | path basename) == "reseed-homebrew-env.fish" } | first)
+    assert (($fish_path | into string) | str starts-with ($xdg_config_home | into string)) "Fish snippet honors XDG_CONFIG_HOME"
+  }
   let all_lines = ($snippets | get lines | flatten)
   assert ($all_lines | any {|line| $line == "$env.HOMEBREW_API_DOMAIN = \"https://mirrors.ustc.edu.cn/homebrew-bottles/api\"" }) "Nushell snippet exports the environment"
   assert ($all_lines | any {|line| $line == "set -gx HOMEBREW_BOTTLE_DOMAIN 'https://mirrors.ustc.edu.cn/homebrew-bottles'" }) "Fish snippet exports the environment"
   assert ($all_lines | any {|line| $line == "export HOMEBREW_BOTTLE_DOMAIN='https://mirrors.ustc.edu.cn/homebrew-bottles'" }) "POSIX snippet exports the environment"
   assert ($all_lines | any {|line| $line == "$env:HOMEBREW_API_DOMAIN = 'https://mirrors.ustc.edu.cn/homebrew-bottles/api'" }) "PowerShell snippet exports the environment"
-  assert ($all_lines | any {|line| $line == "set -gx HOMEBREW_TOKEN 'a''b'" }) "Fish snippet escapes single quotes"
+  assert ($all_lines | any {|line| $line == "set -gx HOMEBREW_TOKEN 'a\\'b'" }) "Fish snippet escapes single quotes"
   assert ($all_lines | any {|line| $line == "export HOMEBREW_TOKEN='a'\\''b'" }) "POSIX snippet escapes single quotes"
   assert ($all_lines | any {|line| $line == "$env:HOMEBREW_TOKEN = 'a''b'" }) "PowerShell snippet escapes single quotes"
   assert ($all_lines | any {|line| $line == "$env.HOMEBREW_TOKEN = \"a'b\"" }) "Nushell snippet keeps single quotes in double-quoted literals"
@@ -251,31 +274,33 @@ def test-workflow-plan [
 # Tool observation: dry-run behavior, filenames, and the unknown-manager
 # extension point.
 def test-tooling-observations [
-  engine_root: path # Engine root for the disposable test state.
+  _engine_root: path # Retained for the common test function interface.
   state_root: path # Private state template root.
 ] {
   let config = (load-config $state_root [personal])
-  let dry_state = ($engine_root | path join "tests" $".reseed-tooling-test-(random uuid)")
-  let tooling_config = ($config
-    | upsert state_dir ($dry_state | into string)
-    | upsert observations.tool_managers [cargo pnpm bun uv npm yarn])
-  let observations = (tooling-observe $state_root $tooling_config --dry-run)
-  assert eq ($observations.manager) [cargo pnpm bun uv uv npm yarn] "tool observation order"
-  assert ($observations | where available | all {|item| $item.ok and $item.detail == "would capture" }) "available tool observations support dry run"
-  assert eq ($observations.observation | each {|path| $path | path basename }) [
-    cargo-install.txt
-    pnpm-global.json
-    bun-global-package.json
-    uv-tools.txt
-    uv-python.json
-    npm-global.json
-    yarn-global.jsonl
-  ] "tool observation filenames"
-  assert (not ($dry_state | path exists)) "tool observation dry run writes no state"
+  with-temp-dir "reseed-tooling-test.XXXXXXXX" {|sandbox|
+    let dry_state = ($sandbox | path join "state")
+    let tooling_config = ($config
+      | upsert state_dir ($dry_state | into string)
+      | upsert observations.tool_managers [cargo pnpm bun uv npm yarn])
+    let observations = (tooling-observe $state_root $tooling_config --dry-run)
+    assert eq ($observations.manager) [cargo pnpm bun uv uv npm yarn] "tool observation order"
+    assert ($observations | where available | all {|item| $item.ok and $item.detail == "would capture" }) "available tool observations support dry run"
+    assert eq ($observations.observation | each {|path| $path | path basename }) [
+      cargo-install.txt
+      pnpm-global.json
+      bun-global-package.json
+      uv-tools.txt
+      uv-python.json
+      npm-global.json
+      yarn-global.jsonl
+    ] "tool observation filenames"
+    assert (not ($dry_state | path exists)) "tool observation dry run writes no state"
 
-  let unknown = (tooling-observe $state_root ($tooling_config | upsert observations.tool_managers [future-manager]) --dry-run | first)
-  assert eq $unknown.ok false "unknown observation manager is reported"
-  assert ($unknown.migration | str contains "add an integration") "unknown observation manager reserves an extension point"
+    let unknown = (tooling-observe $state_root ($tooling_config | upsert observations.tool_managers [future-manager]) --dry-run | first)
+    assert eq $unknown.ok false "unknown observation manager is reported"
+    assert ($unknown.migration | str contains "add an integration") "unknown observation manager reserves an extension point"
+  }
 }
 
 # Mise command construction and the shared managed-tool environment, plus
@@ -283,19 +308,147 @@ def test-tooling-observations [
 def test-mise-commands [
   state_root: path # Private state template root.
 ] {
+  let config = (load-config $state_root [personal])
   assert eq (mise-exec-args ($state_root | path join "mise.toml") "pnpm" ["--version"]) ["-C" ($state_root | into string) "exec" "--" "pnpm" "--version"] "mise exec command construction"
   assert eq (mise-exec-args ($state_root | path join "mise.work.toml") "uv" ["--version"]) ["-C" ($state_root | into string) "-E" "work" "exec" "--" "uv" "--version"] "mise environment command construction"
+  assert eq (mise-shell-config $state_root $config) (($state_root | path join "mise.toml") | path expand --no-symlink) "mise shell config resolves from configuration"
   assert eq ((managed-tool-environment).PNPM_HOME) (managed-bin-dir | into string) "PNPM_HOME uses managed bin directory"
   assert eq ((managed-tool-environment).UV_TOOL_BIN_DIR) (managed-bin-dir | into string) "UV_TOOL_BIN_DIR uses managed bin directory"
   assert eq ((managed-tool-environment).YARN_PREFIX) (managed-bin-dir | path dirname | into string) "YARN_PREFIX uses managed root"
   assert eq ((managed-tool-environment).BUN_INSTALL) (managed-bin-dir | path dirname | into string) "BUN_INSTALL uses managed root"
-  let shell_script = (open --raw ($state_root | path join "scripts" "configure-shells.nu"))
-  assert ($shell_script | str contains "PNPM_HOME") "shell generation includes PNPM_HOME"
-  assert ($shell_script | str contains "UV_TOOL_BIN_DIR") "shell generation includes UV_TOOL_BIN_DIR"
-  assert ($shell_script | str contains "YARN_PREFIX") "shell generation includes YARN_PREFIX"
-  assert ($shell_script | str contains "BUN_INSTALL") "shell generation includes BUN_INSTALL"
-  assert ($shell_script | str contains "PowerShell profile") "shell generation includes PowerShell adapter"
-  assert ($shell_script | str contains "POSIX profile") "shell generation includes POSIX adapter"
+  assert eq ((managed-tool-environment).CARGO_INSTALL_ROOT) (managed-bin-dir | path dirname | into string) "Cargo installs use managed root"
+  assert eq (cargo-binstall-args (managed-bin-dir | path dirname) [ripgrep]) ["--no-confirm" "--disable-telemetry" "--root" (managed-bin-dir | path dirname | into string) ripgrep] "cargo-binstall uses explicit shared root"
+}
+
+# Execute the shell generator in an isolated home, repeat it to exercise
+# idempotence, and source the generated Nushell environment.
+def test-shell-generation-in [
+  sandbox: path # Temporary directory containing the isolated environment.
+  state_root: path # State template providing a valid mise config.
+] {
+  let test_state = ($sandbox | path join "State Root's Config")
+  let home = ($sandbox | path join "Home's Spaces")
+  let data = ($sandbox | path join "Nushell Data")
+  let cargo_home = ($sandbox | path join "Cargo Home's Spaces")
+  let xdg_config_home = ($sandbox | path join "XDG Config's Spaces")
+  let brew_prefix = ($sandbox | path join "Homebrew Prefix's Spaces")
+  let mise_config = ($test_state | path join "mise.toml")
+  let starship_source = ($sandbox | path join "starship-source.nu")
+  let mise_source = ($sandbox | path join "mise-source.nu")
+  mkdir $test_state
+  mkdir $home
+  mkdir ($cargo_home | path join "bin")
+  mkdir ($brew_prefix | path join "bin") ($brew_prefix | path join "sbin")
+  cp ($state_root | path join "mise.toml") $mise_config
+  "# isolated Starship activation\n" | save $starship_source
+  "# isolated mise activation\n$env.MISE_SHELL = 'nu'\n" | save $mise_source
+  "export RESEED_PROFILE_SENTINEL=1  \n\n" | save ($home | path join ".bashrc")
+
+  let legacy_dir = ($data | path join "vendor" "autoload")
+  mkdir $legacy_dir
+  "legacy\n" | save ($legacy_dir | path join "mise.nu")
+  "legacy\n" | save ($legacy_dir | path join "reseed-managed-tools.nu")
+  let script = ($state_root | path join "scripts" "configure-shells.nu")
+  let args = [
+    "--no-config-file" ($script | into string)
+    "--home" ($home | into string)
+    "--data-dir" ($data | into string)
+    "--mise-config" ($mise_config | into string)
+    "--state-root" ($test_state | into string)
+    "--cargo-home" ($cargo_home | into string)
+    "--xdg-config-home" ($xdg_config_home | into string)
+    "--starship-init-source" ($starship_source | into string)
+    "--mise-activation-source" ($mise_source | into string)
+  ]
+  with-env {HOMEBREW_PREFIX: $brew_prefix} {
+    run-command nu $args --quiet --capture | ignore
+    run-command nu $args --quiet --capture | ignore
+  }
+
+  let autoload = ($data | path join "vendor" "autoload")
+  let nu_environment = ($autoload | path join "reseed-10-environment.nu")
+  let nu_activation = ($autoload | path join "reseed-20-mise.nu")
+  let shell_dir = ($home | path join ".local" "share" "reseed" "shell")
+  let bash_adapter = ($shell_dir | path join "reseed-managed-tools.bash")
+  let zsh_adapter = ($shell_dir | path join "reseed-managed-tools.zsh")
+  let posix_adapter = ($shell_dir | path join "reseed-managed-tools.sh")
+  let powershell_adapter = ($shell_dir | path join "reseed-managed-tools.ps1")
+  let fish_adapter = ($xdg_config_home | path join "fish" "conf.d" "reseed-managed-tools.fish")
+  assert ($nu_environment | path exists) "Nushell environment adapter is generated"
+  assert ($nu_activation | path exists) "Nushell activation adapter is generated"
+  assert (not (($autoload | path join "mise.nu") | path exists)) "legacy mise autoload is removed"
+  assert (not (($autoload | path join "reseed-managed-tools.nu") | path exists)) "legacy environment autoload is removed"
+
+  let bash = (open --raw $bash_adapter)
+  let zsh = (open --raw $zsh_adapter)
+  let dispatch = (open --raw $posix_adapter)
+  let powershell = (open --raw $powershell_adapter)
+  let fish = (open --raw $fish_adapter)
+  assert ($bash | str contains "mise activate bash") "Bash uses Bash activation"
+  assert (not ($bash | str contains "mise activate zsh")) "Bash does not install Zsh hooks"
+  assert ($zsh | str contains "mise activate zsh") "Zsh uses Zsh activation"
+  assert (not ($zsh | str contains "mise activate bash")) "Zsh does not install Bash hooks"
+  assert (($dispatch | str contains "mise activate bash") and ($dispatch | str contains "mise activate zsh")) "compatibility adapter dispatches by shell"
+  assert (($bash | str index-of "reseed_prepend_path") < ($bash | str index-of "mise activate bash")) "mise activation owns final PATH precedence"
+  let posix_cargo_bin = (($cargo_home | path join "bin" | into string) | str replace --all "\\" "/" | str replace --all "'" "'\\''")
+  assert ($bash | str contains $posix_cargo_bin) "Bash uses configured Cargo home"
+  let posix_brew_bin = (($brew_prefix | path join "bin" | into string) | str replace --all "\\" "/" | str replace --all "'" "'\\''")
+  assert ($bash | str contains $posix_brew_bin) "Bash persists declared Homebrew prefix"
+  let powershell_mise_config = (($mise_config | into string) | str replace --all "'" "''")
+  assert ($powershell | str contains $powershell_mise_config) "PowerShell uses selected mise config"
+  assert ($fish | str contains (($mise_config | into string) | str replace --all "\\" "/")) "Fish uses selected mise config"
+  if (command-exists pwsh) {
+    let ps_path = (($powershell_adapter | into string) | str replace --all "'" "''")
+    let ps_command = "[scriptblock]::Create((Get-Content -Raw -LiteralPath '" + $ps_path + "')) | Out-Null"
+    run-command pwsh ["-NoProfile" "-Command" $ps_command] --quiet --capture | ignore
+  }
+
+  let bash_profile = (open --raw ($home | path join ".bashrc"))
+  let zsh_profile = (open --raw ($home | path join ".zshrc"))
+  let powershell_profile = if $nu.os-info.name == "windows" {
+    $home | path join "Documents" "PowerShell" "Microsoft.PowerShell_profile.ps1"
+  } else {
+    $home | path join ".config" "powershell" "Microsoft.PowerShell_profile.ps1"
+  }
+  assert eq ($bash_profile | split row "# >>> Reseed managed tools >>>" | length) 2 "Bash loader block is idempotent"
+  assert ($bash_profile | str starts-with "export RESEED_PROFILE_SENTINEL=1  \n\n") "Bash loader preserves unmanaged profile content"
+  assert eq ($zsh_profile | split row "# >>> Reseed managed tools >>>" | length) 2 "Zsh loader block is idempotent"
+  assert eq ((open --raw $powershell_profile) | split row "# >>> Reseed managed tools >>>" | length) 2 "PowerShell loader block is idempotent"
+  let nu_literal = ($nu_environment | into string | to nuon)
+  let probe = (run-command nu ["--no-config-file" "-c" $"source ($nu_literal); print $env.MISE_GLOBAL_CONFIG_FILE"] --quiet --capture)
+  assert eq ($probe.stdout | str trim) ($mise_config | path expand --no-symlink | into string) "generated Nushell environment exports selected config"
+
+  let stale_environment = ($autoload | path join "reseed-managed-tools.nu")
+  let stale_activation = ($autoload | path join "mise.nu")
+  let stale_starship = ($autoload | path join "starship.nu")
+  "stale\n" | save --force $stale_environment
+  "stale\n" | save --force $stale_activation
+  let missing_source = ($sandbox | path join "missing-mise-source.nu")
+  let failed_args = [
+    "--no-config-file" ($script | into string)
+    "--home" ($home | into string)
+    "--data-dir" ($data | into string)
+    "--mise-config" ($mise_config | into string)
+    "--state-root" ($test_state | into string)
+    "--cargo-home" ($cargo_home | into string)
+    "--xdg-config-home" ($xdg_config_home | into string)
+    "--starship-init-source" ($starship_source | into string)
+    "--mise-activation-source" ($missing_source | into string)
+  ]
+  let failed = (run-command nu $failed_args --quiet --capture --allow-failure)
+  assert ($failed.exit_code != 0) "shell generation reports activation failure"
+  assert (not ($stale_environment | path exists)) "failed generation removes stale Nushell environment"
+  assert (not ($stale_activation | path exists)) "failed generation removes stale Nushell activation"
+  assert (not ($stale_starship | path exists)) "failed generation removes stale Starship activation"
+}
+
+def test-shell-generation [
+  _engine_root: path # Retained for the common test function interface.
+  state_root: path # State template providing a valid mise config.
+] {
+  with-temp-dir "reseed-shell-test.XXXXXXXX" {|sandbox|
+    test-shell-generation-in $sandbox $state_root
+  }
 }
 
 # Mise backend dependencies, install ordering, and package record
@@ -406,6 +559,12 @@ def test-mise-config-validation [
   let config = (load-config $state_root [personal])
   let invalid_manager_config = ($config | upsert software.mise.manager_config missing.toml)
   assert ((validate-config $state_root $invalid_manager_config) | any {|issue| $issue.area == mise and ($issue.message | str contains "manager_config") }) "manager config selection validation"
+  let invalid_manager_config_type = ($config | upsert software.mise.manager_config 42)
+  assert ((validate-config $state_root $invalid_manager_config_type) | any {|issue| $issue.area == mise and ($issue.message | str contains "must be a string") }) "manager config type validation"
+  let invalid_shell_config = ($config | upsert software.mise.shell_config missing.toml)
+  assert ((validate-config $state_root $invalid_shell_config) | any {|issue| $issue.area == mise and ($issue.message | str contains "shell_config") }) "shell config selection validation"
+  let invalid_shell_config_type = ($config | upsert software.mise.shell_config 42)
+  assert ((validate-config $state_root $invalid_shell_config_type) | any {|issue| $issue.area == mise and ($issue.message | str contains "must be a string") }) "shell config type validation"
   assert ((mise-manager-config $state_root $config) | path exists) "manager config resolves to an existing file"
 
   let invalid_mise = ($config | upsert software.mise.configs [tools.custom.toml])
@@ -462,23 +621,22 @@ def test-secret-guard [
   assert eq (secret-content-matches "nothing secret here") [] "clean content passes"
 
   if not (command-exists git) { return }
-  let scan_root = ($engine_root | path join "tests" $".reseed-secret-test-(random uuid)")
-  mkdir $scan_root
-  run-command git ["-C" $scan_root "init" "-b" "main" "-q"] --quiet | ignore
-  "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAAB3NzaC1yc2E" | save --force ($scan_root | path join "id_ed25519")
-  ("export GH_TOKEN=" + "gh" + "p_" + $payload36) | save --force ($scan_root | path join ".env")
-  0x[00 FF 00 01] | save --raw --force ($scan_root | path join "blob.bin")
-  "[user]\nname = Test" | save --force ($scan_root | path join ".gitconfig")
-  run-command git ["-C" $scan_root "add" "--all"] --quiet | ignore
-  let secrets = (scan-commit-secrets $scan_root)
-  assert (($secrets | any {|match| $match.pattern == "SSH private key" })) "repository scan finds SSH private key files"
-  assert (($secrets | any {|match| $match.pattern == "environment file" })) "repository scan finds environment files"
-  assert (($secrets | any {|match| $match.pattern == "GitHub token" })) "repository scan finds token content"
-  assert (not ($secrets | any {|match| ($match.path | str contains ".gitconfig") })) "repository scan ignores clean config files"
-  assert (not ($secrets | any {|match| ($match.path | str contains "blob.bin") })) "repository scan skips binary files"
-  let summary = (commit-change-summary $scan_root)
-  assert (($summary | any {|entry| ($entry.path | str contains "id_ed25519") and $entry.size > 0B })) "commit summary lists changed files with sizes"
-  rm --recursive --force $scan_root
+  with-temp-dir "reseed-secret-test.XXXXXXXX" {|scan_root|
+    run-command git ["-C" $scan_root "init" "-b" "main" "-q"] --quiet | ignore
+    "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAAB3NzaC1yc2E" | save --force ($scan_root | path join "id_ed25519")
+    ("export GH_TOKEN=" + "gh" + "p_" + $payload36) | save --force ($scan_root | path join ".env")
+    0x[00 FF 00 01] | save --raw --force ($scan_root | path join "blob.bin")
+    "[user]\nname = Test" | save --force ($scan_root | path join ".gitconfig")
+    run-command git ["-C" $scan_root "add" "--all"] --quiet | ignore
+    let secrets = (scan-commit-secrets $scan_root)
+    assert (($secrets | any {|match| $match.pattern == "SSH private key" })) "repository scan finds SSH private key files"
+    assert (($secrets | any {|match| $match.pattern == "environment file" })) "repository scan finds environment files"
+    assert (($secrets | any {|match| $match.pattern == "GitHub token" })) "repository scan finds token content"
+    assert (not ($secrets | any {|match| ($match.path | str contains ".gitconfig") })) "repository scan ignores clean config files"
+    assert (not ($secrets | any {|match| ($match.path | str contains "blob.bin") })) "repository scan skips binary files"
+    let summary = (commit-change-summary $scan_root)
+    assert (($summary | any {|entry| ($entry.path | str contains "id_ed25519") and $entry.size > 0B })) "commit summary lists changed files with sizes"
+  }
 }
 
 def main [] {
@@ -498,6 +656,7 @@ def main [] {
   test-secret-guard $engine_root
   test-tooling-observations $engine_root $state_root
   test-mise-commands $state_root
+  test-shell-generation $engine_root $state_root
   test-mise-backends $engine_root $state_root
   test-spec-parsing
   test-manifest-validation $engine_root $state_root

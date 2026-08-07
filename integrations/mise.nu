@@ -53,9 +53,47 @@ export def mise-install-plan [
   $commands
 }
 
+# Environment passed to the shell generator so it uses the selected source
+# and shell config rather than rediscovering either from the user home.
+export def mise-shell-task-environment [
+  root: path # Private state root.
+  config: record # Loaded configuration.
+]: nothing -> record {
+  let shell_config = (mise-shell-config $root $config | into string)
+  {
+    RESEED_STATE_ROOT: ($root | path expand --no-symlink | into string)
+    RESEED_MISE_CONFIG_FILE: $shell_config
+    MISE_GLOBAL_CONFIG_FILE: $shell_config
+  }
+}
+
+# Config file used to run tasks. Environment-specific configs are ordered last
+# and mise applies their native environment selection through mise-args.
+def mise-task-config [
+  root: path # Private state root.
+  settings: record # Mise configuration section.
+]: nothing -> any {
+  let configs = ($settings.configs? | default [])
+  if ($configs | is-empty) { null } else { $root | path join ($configs | last) }
+}
+
+# Shell task selection with compatibility for state repositories created before
+# shell_task was split from general restore_tasks.
+export def mise-shell-task [settings: record]: nothing -> string {
+  let explicit = ($settings.shell_task? | default null)
+  if $explicit != null {
+    $explicit
+  } else if "reseed:shells" in ($settings.restore_tasks? | default []) {
+    "reseed:shells"
+  } else {
+    ""
+  }
+}
+
 # Restore the portable-tools stage: install mise tools, prepare the managed
-# bin directory, then restore the cargo-binstall, uv, and Node manager
-# globals, and finally run any configured restore tasks.
+# bin directory, then restore the cargo-binstall, uv, and Node manager globals,
+# and finally run general restore tasks. Shell configuration runs after
+# chezmoi so generated profile loaders cannot be overwritten by apply.
 export def mise-restore [
   root: path # Private state root.
   config: record # Loaded configuration.
@@ -78,12 +116,32 @@ export def mise-restore [
 
   # Restore tasks run against the last configured config, matching mise's
   # own "last config wins" scoping for ad-hoc commands.
-  let configs = ($settings.configs? | default [])
-  let task_config = if ($configs | is-empty) { null } else { $root | path join ($configs | last) }
-  for task in ($settings.restore_tasks? | default []) {
+  let task_config = (mise-task-config $root $settings)
+  let shell_task = (mise-shell-task $settings)
+  for task in (($settings.restore_tasks? | default []) | where {|task| $task != $shell_task }) {
     if $task_config == null { error make {msg: $"Cannot run mise task '($task)' without a mise config"} }
     run-command mise (mise-args $task_config ["run" $task]) --dry-run=$dry_run | ignore
   }
+}
+
+# Generate shell adapters and install their profile loaders after chezmoi has
+# applied the desired home state. The task name is explicit so future shell
+# implementations remain separate from general restore hooks.
+export def mise-configure-shells [
+  root: path # Private state root.
+  config: record # Loaded configuration.
+  --dry-run # Show generation without changing the home directory.
+] {
+  let settings = $config.software.mise
+  if not ($settings.enabled? | default false) { return }
+  let task = (mise-shell-task $settings)
+  if ($task | str trim | is-empty) { return }
+  if not (command-exists mise) and not $dry_run {
+    error make {msg: "mise is required to configure interactive shells"}
+  }
+  let task_config = (mise-task-config $root $settings)
+  if $task_config == null { error make {msg: $"Cannot run mise shell task '($task)' without a mise config"} }
+  run-command mise (mise-args $task_config ["run" $task]) --environment=(mise-shell-task-environment $root $config) --dry-run=$dry_run | ignore
 }
 
 # Upgrade every mise config and refresh the managed-tools lifecycle.

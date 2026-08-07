@@ -51,6 +51,10 @@
       enabled: true
       configs: [mise.toml]
       manager_config: mise.toml
+      # Config exposed globally by generated interactive-shell adapters.
+      shell_config: mise.toml
+      # Runs after chezmoi so generated profile loaders remain installed.
+      shell_task: "reseed:shells"
       task_files: [scripts/configure-shells.nu]
       cargo_binstall: {
         enabled: false
@@ -78,7 +82,7 @@
         update: true
       }
       update: true
-      restore_tasks: [reseed:shells]
+      restore_tasks: []
     }
     finder_services: {
       # macOS Finder context menu (Quick Actions): "Open Terminal Here" opens

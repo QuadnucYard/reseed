@@ -64,12 +64,16 @@ Reseed has three software ownership layers:
 WinGet and Homebrew manifests contain only curated platform-specific software.
 Kopia can optionally snapshot narrow opaque application state. The restore
 order is bootstrap preflight, native packages, mise tools, manager manifests,
-shell adapters, chezmoi, snapshots, and verification.
+chezmoi, shell adapters, snapshots, and verification.
 
 The shared manager binary directory is `~/.local/share/reseed/bin`. It is
-ignored by the private repository. The `reseed:shells` task generates Nushell
-and Fish automatic adapters plus PowerShell and POSIX profile snippets after
-the managed tools are installed.
+ignored by the private repository. After chezmoi applies the home state, the
+configured `shell_task` generates Nushell and Fish automatic adapters plus
+separate Bash, Zsh, and PowerShell adapters. Unmanaged profiles receive an
+idempotent loader block; chezmoi-managed profiles must source the generated
+adapter in their desired source. The adapters set `MISE_GLOBAL_CONFIG_FILE` to
+the absolute configured `shell_config`, activate mise, and preserve the
+detected Homebrew prefix, so alternate state roots work in every directory.
 
 ## Daily commands
 

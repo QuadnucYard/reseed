@@ -35,11 +35,12 @@ export def cargo-binstall-packages [
 
 # cargo-binstall arguments; --force makes update reinstall over the existing
 # binaries instead of skipping them.
-def binstall-args [
+export def cargo-binstall-args [
+  install_root: path # Root whose bin directory receives installed commands.
   packages: list<string> # Crates to install.
   --update # Reinstall even when already installed.
 ]: nothing -> list<string> {
-  mut args = ["--no-confirm" "--disable-telemetry"]
+  mut args = ["--no-confirm" "--disable-telemetry" "--root" ($install_root | into string)]
   if $update { $args = ($args | append "--force") }
   $args | append $packages
 }
@@ -53,7 +54,8 @@ def run-binstall [
   --update # Reinstall over existing binaries.
   --dry-run # Show the command without running it.
 ] {
-  run-mise-managed $root $config "cargo-binstall" (binstall-args $packages --update=$update) "mise is required for the configured Cargo packages" --dry-run=$dry_run | ignore
+  let install_root = (managed-bin-dir | path dirname)
+  run-mise-managed $root $config "cargo-binstall" (cargo-binstall-args $install_root $packages --update=$update) "mise is required for the configured Cargo packages" --dry-run=$dry_run | ignore
 }
 
 # Install every configured Cargo crate.
@@ -96,7 +98,7 @@ def installed-cargo-packages [
     return {available: false packages: [] detail: "mise is unavailable"}
   }
   let result = (try {
-    run-mise-managed $root $config "cargo" ["install" "--list"] "mise is required for the configured Cargo packages" --allow-failure --capture
+    run-mise-managed $root $config "cargo" ["install" "--list" "--root" (managed-bin-dir | path dirname | into string)] "mise is required for the configured Cargo packages" --allow-failure --capture
   } catch {|error|
     {
       exit_code: 127

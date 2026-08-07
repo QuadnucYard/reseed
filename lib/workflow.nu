@@ -12,7 +12,7 @@ use ../integrations/bootstrap.nu [bootstrap-outdated bootstrap-status bootstrap-
 use ../integrations/finder.nu [finder-backup finder-enabled finder-reconcile finder-restore finder-status finder-verify]
 use ../integrations/homebrew.nu [homebrew-backup homebrew-persist-env homebrew-reconcile homebrew-restore homebrew-status homebrew-update homebrew-verify]
 use ../integrations/kopia.nu [kopia-backup kopia-restore kopia-status kopia-verify]
-use ../integrations/mise.nu [mise-reconcile mise-restore mise-status mise-update mise-verify]
+use ../integrations/mise.nu [mise-configure-shells mise-reconcile mise-restore mise-status mise-update mise-verify]
 use ../integrations/tooling.nu [tooling-backup tooling-observe]
 use ../integrations/winget.nu [winget-backup winget-reconcile winget-restore winget-status winget-update winget-verify]
 
@@ -235,6 +235,7 @@ export def workflow-restore [
   homebrew-persist-env $config --dry-run=$dry_run
   $checkpoint = (execute-stage $config $checkpoint configuration {
     chezmoi-restore $root $config --dry-run=$dry_run
+    if not $skip_software { mise-configure-shells $root $config --dry-run=$dry_run }
   } --dry-run=$dry_run)
   $checkpoint = (execute-stage $config $checkpoint snapshots {
     kopia-restore $config --dry-run=$dry_run
@@ -306,6 +307,7 @@ export def workflow-update [
   mise-update $root $effective --dry-run=$dry_run
   finder-restore $engine_root $root $effective --dry-run=$dry_run
   chezmoi-restore $root $effective --dry-run=$dry_run
+  mise-configure-shells $root $effective --dry-run=$dry_run
   if $dry_run { info "would run verification checks" } else { workflow-verify $root $effective }
   info "Managed update completed"
 }

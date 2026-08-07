@@ -12,9 +12,9 @@ export def homebrew-env [
 
 # Escape an environment value into a literal for one of the four snippet
 # syntaxes. POSIX shells cannot escape a single quote inside a single-quoted
-# string at all, so it uses the '\'' splice; Fish and PowerShell double the
-# quote inside single-quoted strings; Nushell single quotes are fully
-# literal, so it uses a double-quoted string with backslash escapes.
+# string at all, so it uses the '\'' splice; Fish backslash-escapes quotes,
+# PowerShell doubles them, and Nushell uses a double-quoted string with
+# backslash escapes.
 def quote-env-value [
   value: string # Environment value to quote.
   syntax: string # "nu", "fish", "posix", or "powershell".
@@ -24,6 +24,8 @@ def quote-env-value [
     $"\"($escaped)\""
   } else if $syntax == "posix" {
     $value | str replace --all "'" "'\\''"
+  } else if $syntax == "fish" {
+    $value | str replace --all "\\" "\\\\" | str replace --all "'" "\\'"
   } else {
     $value | str replace --all "'" "''"
   }
@@ -53,9 +55,14 @@ export def homebrew-mirror-label [
 # The four persistent snippet destinations, shared by generation and
 # stale-removal so the paths cannot drift.
 def homebrew-env-snippet-paths []: nothing -> list<path> {
+  let xdg_config_home = if not (($env.XDG_CONFIG_HOME? | default "" | str trim) | is-empty) {
+    $env.XDG_CONFIG_HOME | path expand --no-symlink
+  } else {
+    $nu.home-dir | path join ".config"
+  }
   [
     ($nu.data-dir | path join "vendor" "autoload" "reseed-homebrew-env.nu")
-    ($nu.home-dir | path join ".config" "fish" "conf.d" "reseed-homebrew-env.fish")
+    ($xdg_config_home | path join "fish" "conf.d" "reseed-homebrew-env.fish")
     ($nu.home-dir | path join ".local" "share" "reseed" "shell" "reseed-homebrew-env.sh")
     ($nu.home-dir | path join ".local" "share" "reseed" "shell" "reseed-homebrew-env.ps1")
   ]

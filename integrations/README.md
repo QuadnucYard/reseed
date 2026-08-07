@@ -46,8 +46,8 @@ The package-manager modules live under `managers/`, mirroring the
 
 | Module | Purpose |
 | --- | --- |
-| `mise.nu` | Portable-tools stage: installs mise configs in backend order (Node before `npm:*`, Rust before `cargo:*`, Python before `pipx:*`), runs the Cargo-binstall/uv/Node manager lifecycles, then the configured restore tasks |
-| `managers/cargo_binstall.nu` | Cargo binary crates from `packages/cargo/binstall.nuon`; `update` passes `--force` |
+| `mise.nu` | Portable-tools stage: installs mise configs in backend order (Node before `npm:*`, Rust before `cargo:*`, Python before `pipx:*`), runs manager lifecycles and general restore tasks, then exposes the selected `shell_config` through a dedicated post-chezmoi `shell_task` |
+| `managers/cargo_binstall.nu` | Cargo binary crates from `packages/cargo/binstall.nuon`; installs into the shared managed root and `update` passes `--force` |
 | `managers/uv.nu` | uv tools from `packages/uv/tools.nuon`; specs pin with `==` |
 | `managers/node/node_manager.nu` | The shared pnpm/Yarn/Bun engine: spec parsing (`name` or `name@version`), install/update arguments, inventory parsing (JSON, Yarn JSONL trees, Bun text fallback), and the Yarn-1-only guard (`yarn global` commands were removed in Yarn 2) |
 | `managers/node/pnpm.nu`, `bun.nu`, `yarn.nu` | Thin wrappers over `node_manager.nu` per manager |
