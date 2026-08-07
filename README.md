@@ -168,6 +168,15 @@ the same environment. Nushell and Fish load them automatically; POSIX and
 PowerShell users source `~/.local/share/reseed/shell/reseed-homebrew-env.sh`
 (or `.ps1`) from their profile, exactly like the managed-tools adapters.
 
+When the bootstrap contract tools (Git, chezmoi, Nushell, mise) are already
+installed, the bootstrap checks them for available upgrades: on an interactive
+terminal it prompts before upgrading anything, while non-interactive runs
+(e.g. CI) only report. Pass `--update-tools`/`-UpdateTools` to upgrade without
+prompting, or `--no-update-tools`/`-NoUpdateTools` to skip the check entirely.
+On the engine side, `reseed status` reports each tool's installed and
+available versions, and `reseed verify` warns when a bootstrap tool is
+outdated (advisory; verification still passes).
+
 ## Offline recovery
 
 Bundles contain separate committed `engine/` and `state/` snapshots plus

@@ -7,6 +7,8 @@ profiles="personal"
 no_restore=0
 dry_run=0
 offline=0
+update_tools=0
+no_update_tools=0
 brew_install_url=""
 homebrew_mirror=""
 script_dir=""
@@ -20,8 +22,11 @@ usage() {
   cat <<'EOF'
 Usage: bootstrap.sh [--state-repository URL] [--state-root PATH]
                     [--profiles NAMES] [--no-restore] [--offline] [--dry-run]
+                    [--update-tools] [--no-update-tools]
                     [--brew-install-url URL] [--homebrew-mirror ustc|tuna]
 
+--update-tools      Upgrade outdated bootstrap tools without prompting.
+--no-update-tools   Skip the bootstrap-tool update check entirely.
 --brew-install-url URL   Install Homebrew from a custom installer script.
 --homebrew-mirror NAME   Use a China mirror for the installer and for the
                          bootstrap-tool installs (ustc or tuna; ustc also
@@ -39,6 +44,8 @@ parse_args() {
       --no-restore) no_restore=1; shift ;;
       --offline) offline=1; shift ;;
       --dry-run) dry_run=1; shift ;;
+      --update-tools) update_tools=1; shift ;;
+      --no-update-tools) no_update_tools=1; shift ;;
       --brew-install-url) brew_install_url=$2; shift 2 ;;
       --homebrew-mirror) homebrew_mirror=$2; shift 2 ;;
       -h|--help) usage; exit 0 ;;
@@ -53,6 +60,10 @@ parse_args() {
     ""|ustc|tuna) ;;
     *) echo "Unsupported --homebrew-mirror: $homebrew_mirror (use ustc or tuna)" >&2; exit 2 ;;
   esac
+  if [ "$update_tools" -eq 1 ] && [ "$no_update_tools" -eq 1 ]; then
+    echo "--update-tools and --no-update-tools are mutually exclusive" >&2
+    exit 2
+  fi
 }
 
 # Redact the userinfo of a URL so credentials never leak into errors.
@@ -126,6 +137,7 @@ mirror_environment() {
 
 # Install Homebrew when absent, then the bootstrap-contract tools.
 install_bootstrap_tools() {
+  brew_preexisting=0
   # A requested mirror also routes the bootstrap-tool installs (and a brew
   # update run later) away from GitHub, even when brew already exists.
   if [ -n "$homebrew_mirror" ]; then
@@ -203,6 +215,8 @@ install_bootstrap_tools() {
       echo "If it still needed an administrator password, rerun bootstrap.sh interactively." >&2
       exit 1
     fi
+  else
+    brew_preexisting=1
   fi
 
   printf '%s\n' "reseed: ensuring bootstrap tools"
@@ -219,6 +233,56 @@ install_bootstrap_tools() {
     printf '%s\n' "To keep it in every shell, add these lines to your profile, or run"
     printf '%s\n' "'reseed restore' which persists the mirrors from software.homebrew.env:"
     env | sed -n 's/^\(HOMEBREW_[A-Z0-9_]*\)=\(.*\)$/  export \1="\2"/p'
+  fi
+}
+
+# Check the bootstrap-contract tools for available upgrades and let the user
+# decide whether to apply them. Advisory: a failure only warns, and a fresh
+# Homebrew install is already current so it is skipped.
+check_tool_updates() {
+  [ "$no_update_tools" -eq 1 ] && return
+  [ "$brew_preexisting" -eq 1 ] || return
+  printf '%s\n' "reseed: checking for outdated bootstrap tools"
+  # Refresh the metadata, which also self-updates Homebrew itself; the mirror
+  # environment (when requested) routes this away from GitHub as well.
+  if ! update_output=$(run_with_timeout 900 brew update 2>&1); then
+    echo "reseed: brew update failed; skipping the outdated check" >&2
+    return
+  fi
+  if printf '%s\n' "$update_output" | grep -q "Updated Homebrew"; then
+    printf '%s\n' "reseed: Homebrew itself was updated:"
+    printf '%s\n' "$update_output" | grep "Updated Homebrew" | sed 's/^/  /'
+  fi
+  # Outdated lines are "name installed < available" (brew < 4.4) or
+  # "name (installed: x) != y" (brew >= 4.4); only the leading name matters.
+  outdated_tools=$(brew outdated --formula 2>/dev/null | awk '$1 == "git" || $1 == "chezmoi" || $1 == "nushell" || $1 == "mise"') || true
+  if [ -z "$outdated_tools" ]; then
+    printf '%s\n' "reseed: bootstrap tools are up to date"
+    return
+  fi
+  printf '%s\n' "reseed: outdated bootstrap tools:"
+  printf '%s\n' "$outdated_tools" | sed 's/^/  /'
+  if [ "$dry_run" -eq 1 ]; then
+    printf '%s\n' "reseed: dry run; leaving outdated tools unchanged"
+    return
+  fi
+  if [ "$update_tools" -eq 1 ]; then
+    :
+  elif [ -t 0 ]; then
+    printf '%s\n' "Upgrade these bootstrap tools now? [y/N] "
+    read -r reply
+    case "$reply" in
+      y|Y|yes|YES) ;;
+      *) printf '%s\n' "reseed: skipping upgrade"; return ;;
+    esac
+  else
+    printf '%s\n' "reseed: non-interactive run; leaving outdated tools unchanged"
+    return
+  fi
+  upgrade_list=$(printf '%s\n' "$outdated_tools" | awk '{print $1}' | tr '\n' ' ')
+  printf '%s\n' "reseed: upgrading: $upgrade_list"
+  if ! HOMEBREW_NO_AUTO_UPDATE=1 run_with_timeout 1800 brew upgrade $upgrade_list; then
+    echo "reseed: failed to upgrade the bootstrap tools; continuing with the installed versions" >&2
   fi
 }
 
@@ -305,6 +369,7 @@ if [ "$offline" -eq 1 ]; then
   ensure_offline_tools
 else
   install_bootstrap_tools
+  check_tool_updates
 fi
 
 if [ -z "$script_dir" ] || [ ! -f "$script_dir/reseed.nu" ]; then

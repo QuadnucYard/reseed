@@ -7,7 +7,7 @@ use config.nu [config-fingerprint load-config validate-config]
 use state.nu [complete-stage fail-stage load-checkpoint stage-done]
 use git.nu [git-bundle git-commit git-init git-pull git-status]
 use ../integrations/chezmoi.nu [chezmoi-backup chezmoi-restore chezmoi-status chezmoi-verify]
-use ../integrations/bootstrap.nu [bootstrap-status bootstrap-verify]
+use ../integrations/bootstrap.nu [bootstrap-outdated bootstrap-status bootstrap-verify]
 use ../integrations/homebrew.nu [homebrew-backup homebrew-persist-env homebrew-reconcile homebrew-restore homebrew-status homebrew-update homebrew-verify]
 use ../integrations/kopia.nu [kopia-backup kopia-restore kopia-status kopia-verify]
 use ../integrations/mise.nu [mise-reconcile mise-restore mise-status mise-update mise-verify]
@@ -103,6 +103,15 @@ export def workflow-plan [
   ]
 }
 
+# Warn about outdated bootstrap tools; advisory only.
+def warn-bootstrap-outdated [
+  outdated: list<record> # Outdated bootstrap tools.
+] {
+  if ($outdated | is-empty) { return }
+  warning $"Outdated bootstrap tools: (($outdated | each {|tool| $'($tool.command) ($tool.version) -> ($tool.latest)' }) | str join ', ')"
+  info "Upgrade them by rerunning the platform bootstrap with --update-tools"
+}
+
 # Report integration availability, private repository state, and desired-state
 # file health as tables.
 export def workflow-status [
@@ -113,8 +122,11 @@ export def workflow-status [
   info $"private state: ($root)"
   info $"profiles: ($config.active_profiles | str join ', ')"
   let git = (git-status $root)
+  let bootstrap = (bootstrap-status)
+  let outdated = (bootstrap-outdated)
+  let outdated_names = (if ($outdated | is-empty) { null } else { $outdated | get name })
   [
-    ({tool: bootstrap enabled: true applicable: true available: ((bootstrap-status | where available == false | is-empty)) desired: (bootstrap-status | each {|item| {command: $item.command available: $item.available} })})
+    ({tool: bootstrap enabled: true applicable: true available: (($bootstrap | where available == false | is-empty)) outdated: $outdated_names desired: ($bootstrap | each {|item| {command: $item.command available: $item.available} })})
     (chezmoi-status $root $config)
     (winget-status $root $config)
     (homebrew-status $root $config)
@@ -125,6 +137,7 @@ export def workflow-status [
 
   let issues = (validate-config $root $config)
   if ($issues | is-empty) { info "desired-state files are present" } else { $issues | table | print }
+  warn-bootstrap-outdated $outdated
 }
 
 # Fail when the configuration has any validation error-level issue.
@@ -322,6 +335,7 @@ export def workflow-verify [
   let failures = ($results | where {|item| not $item.ok })
   if ($failures | is-not-empty) { fail $"Verification failed: ($failures | length) checks" }
   info "Verification passed"
+  warn-bootstrap-outdated (bootstrap-outdated --skip-software=$skip_software)
 }
 
 # Build an offline archive from committed engine and private-state snapshots.

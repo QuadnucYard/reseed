@@ -3,7 +3,7 @@ use ./helpers.nu *
 use ../lib/config.nu [config-fingerprint deep-merge load-config parse-profiles validate-config]
 use ../lib/prelude.nu *
 use ../lib/workflow.nu [workflow-plan workflow-verification-tools]
-use ../integrations/bootstrap.nu [bootstrap-brew-items bootstrap-tools bootstrap-winget-ids]
+use ../integrations/bootstrap.nu [bootstrap-brew-items bootstrap-outdated bootstrap-tools bootstrap-winget-ids parse-brew-outdated parse-winget-upgrade-table]
 use ../integrations/homebrew.nu [brewfile-items homebrew-env homebrew-persist-env homebrew-shell-snippets native-brewfile-items]
 use ../integrations/managers/cargo_binstall.nu [cargo-binstall-packages]
 use ../integrations/mise.nu [mise-install-plan mise-reconcile]
@@ -70,6 +70,21 @@ def test-manager-entries [
 # native manifests must exclude.
 def test-bootstrap-contract [] {
   assert eq (bootstrap-tools | get command) [git chezmoi nu mise] "bootstrap contract"
+  assert eq (bootstrap-winget-ids) ["Git.Git" "twpayne.chezmoi" "Nushell.Nushell" "jdx.mise"] "bootstrap WinGet ids"
+  assert eq (bootstrap-tools | get name) (bootstrap-brew-items | each {|item| $item | str replace --regex '^brew "' "" | str replace '"' "" }) "brew items match tool names"
+}
+
+# Outdated-tool detection: both Homebrew output formats and the WinGet
+# upgrade table parse into name -> latest records.
+def test-bootstrap-updates [] {
+  let brew_old = "git 2.47.1 < 2.48.0\nfish 3.7.1 < 3.7.2\nchezmoi 2.57.0 < 2.58.0"
+  assert eq (parse-brew-outdated $brew_old) {git: "2.48.0" chezmoi: "2.58.0"} "brew outdated parses the old format"
+  let brew_new = "git (installed: 2.47.1) != 2.48.0\nnushell (installed: 0.114.1) != 0.115.0"
+  assert eq (parse-brew-outdated $brew_new) {git: "2.48.0" nushell: "0.115.0"} "brew outdated parses the new format"
+  assert eq (parse-brew-outdated "") {} "brew output without rows is empty"
+  let winget = "Name Id Version Available Source\n---- -- ------- --------- ------\nGit Git.Git 2.47.1 2.48.0 winget\nNushell Nushell.Nushell 0.114.1 0.115.0 winget"
+  assert eq (parse-winget-upgrade-table $winget) {git: "2.48.0" nushell: "0.115.0"} "winget upgrade table maps ids to tool names"
+  assert eq (parse-winget-upgrade-table "No available upgrade found.") {} "winget output without rows is empty"
 }
 
 # Cargo-binstall manifest reading and validation.
@@ -399,6 +414,7 @@ def main [] {
   test-config-layer $state_root
   test-manager-entries $engine_root $state_root
   test-bootstrap-contract
+  test-bootstrap-updates
   test-cargo-binstall $engine_root $state_root
   test-winget-manifests $engine_root $state_root
   test-brewfile-manifests $engine_root $state_root

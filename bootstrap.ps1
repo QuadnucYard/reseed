@@ -1,5 +1,44 @@
 #requires -Version 5.1
 
+<#
+.SYNOPSIS
+    Bootstrap the Reseed engine on Windows: installs the bootstrap-contract
+    tools (Git, chezmoi, Nushell, mise) through WinGet when missing, and
+    checks them for available upgrades.
+
+.DESCRIPTION
+    When a bootstrap tool is outdated the script prompts before upgrading
+    (interactive runs only). -UpdateTools applies upgrades without prompting;
+    -NoUpdateTools skips the upgrade check entirely. WinGet itself is a Store
+    app without a CLI self-update, so only the contract tools are checked.
+
+.PARAMETER StateRepository
+    Private state repository URL; cloned when the state root is uninitialized.
+
+.PARAMETER StateRoot
+    Private state root; defaults to RESEED_STATE_ROOT or ~\.local\share\reseed.
+
+.PARAMETER Profiles
+    Comma-separated profile names; defaults to "personal".
+
+.PARAMETER Scope
+    WinGet install/upgrade scope; defaults to "machine".
+
+.PARAMETER NoRestore
+    Stop after bootstrapping and state initialization.
+
+.PARAMETER Offline
+    Require the bootstrap tools to already exist; skips installs and checks.
+
+.PARAMETER DryRun
+    Report outdated tools without upgrading, and run the restore as a dry run.
+
+.PARAMETER UpdateTools
+    Upgrade outdated bootstrap tools without prompting.
+
+.PARAMETER NoUpdateTools
+    Skip the bootstrap-tool upgrade check entirely.
+#>
 [CmdletBinding()]
 param(
     [Alias("Repository")]
@@ -10,11 +49,17 @@ param(
     [string]$Scope = "machine",
     [switch]$NoRestore,
     [switch]$Offline,
-    [switch]$DryRun
+    [switch]$DryRun,
+    [switch]$UpdateTools,
+    [switch]$NoUpdateTools
 )
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version 2.0
+
+if ($UpdateTools -and $NoUpdateTools) {
+    throw "-UpdateTools and -NoUpdateTools are mutually exclusive."
+}
 
 <#
 .SYNOPSIS
@@ -111,6 +156,151 @@ function Install-WinGetPackage {
 
 <#
 .SYNOPSIS
+    The bootstrap contract: WinGet identifiers and their commands.
+#>
+function Get-BootstrapContract {
+    return @(
+        @{ Id = "Git.Git"; Command = "git.exe" }
+        @{ Id = "twpayne.chezmoi"; Command = "chezmoi.exe" }
+        @{ Id = "Nushell.Nushell"; Command = "nu.exe" }
+        @{ Id = "jdx.mise"; Command = "mise.exe" }
+    )
+}
+
+<#
+.SYNOPSIS
+    Return the available upgrade for a WinGet package, or $null.
+.DESCRIPTION
+    Queries "winget list --upgrade-available" and parses the result table.
+    Failures (unparsable output, stale source metadata) degrade to $null so
+    the check never blocks the bootstrap.
+#>
+function Get-WinGetUpgradeVersion {
+    param([string]$Id)
+    $lines = @(& winget.exe list --id $Id --exact --upgrade-available 2>$null)
+    $inTable = $false
+    foreach ($line in $lines) {
+        if ($line -match '^-{5,}') {
+            $inTable = $true
+            continue
+        }
+        if ($inTable -and $line.Trim() -and $line -match [regex]::Escape($Id)) {
+            $fields = @($line -split '\s+' | Where-Object { $_ })
+            if ($fields.Count -ge 5) {
+                return [pscustomobject]@{ Installed = $fields[2]; Available = $fields[3] }
+            }
+        }
+    }
+    return $null
+}
+
+<#
+.SYNOPSIS
+    Upgrade a package with WinGet to its latest version.
+.DESCRIPTION
+    Uses the requested scope first and retries with WinGet's default scope
+    when that fails. Upgrade failures only warn: the installed version stays
+    in place and the bootstrap continues.
+#>
+function Update-WinGetPackage {
+    param(
+        [string]$Id,
+        [string]$Command
+    )
+    Write-Step "upgrading $Id"
+    $arguments = @(
+        "upgrade", "--id", $Id, "--exact", "--scope", $Scope,
+        "--accept-source-agreements", "--accept-package-agreements",
+        "--disable-interactivity"
+    )
+    & winget.exe @arguments
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "The requested $Scope scope was unavailable for $Id; retrying with its default scope."
+        $arguments = @(
+            "upgrade", "--id", $Id, "--exact",
+            "--accept-source-agreements", "--accept-package-agreements",
+            "--disable-interactivity"
+        )
+        & winget.exe @arguments
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "WinGet failed to upgrade $Id (exit $LASTEXITCODE); keeping the installed version."
+            return
+        }
+    }
+    Refresh-Path
+    if (-not (Test-Command $Command)) {
+        throw "$Id was upgraded but $Command is not visible on PATH. Open a new terminal and rerun bootstrap.ps1."
+    }
+}
+
+<#
+.SYNOPSIS
+    True when the run is interactive: a user session with unredirected stdin.
+#>
+function Test-Interactive {
+    return [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
+}
+
+<#
+.SYNOPSIS
+    Check the bootstrap-contract tools for available WinGet upgrades.
+.DESCRIPTION
+    Prompts before upgrading on interactive runs; -UpdateTools upgrades
+    without prompting; non-interactive runs and -DryRun only report.
+#>
+function Update-OutdatedBootstrapTools {
+    if ($NoUpdateTools) { return }
+    if (-not (Test-Command "winget.exe")) {
+        Write-Step "winget is unavailable; skipping the outdated check"
+        return
+    }
+    Write-Step "checking for outdated bootstrap tools"
+    $outdated = @()
+    foreach ($tool in Get-BootstrapContract) {
+        $version = Get-WinGetUpgradeVersion -Id $tool.Id
+        if ($null -ne $version) {
+            $outdated += [pscustomobject]@{
+                Id = $tool.Id
+                Command = $tool.Command
+                Installed = $version.Installed
+                Available = $version.Available
+            }
+        }
+    }
+    if ($outdated.Count -eq 0) {
+        Write-Step "bootstrap tools are up to date"
+        return
+    }
+    Write-Step "outdated bootstrap tools:"
+    foreach ($tool in $outdated) {
+        Write-Host "  $($tool.Id) $($tool.Installed) -> $($tool.Available)"
+    }
+    if ($DryRun) {
+        Write-Step "dry run: leaving outdated bootstrap tools unchanged"
+        return
+    }
+    $upgrade = $false
+    if ($UpdateTools) {
+        $upgrade = $true
+    }
+    elseif (Test-Interactive) {
+        $reply = Read-Host "Upgrade these bootstrap tools now? [y/N]"
+        $upgrade = $reply.Trim().ToLowerInvariant() -match '^(y|yes)$'
+        if (-not $upgrade) { Write-Step "skipping upgrade" }
+    }
+    else {
+        Write-Step "non-interactive run: leaving outdated bootstrap tools unchanged"
+        return
+    }
+    if ($upgrade) {
+        foreach ($tool in $outdated) {
+            Update-WinGetPackage -Id $tool.Id -Command $tool.Command
+        }
+    }
+}
+
+<#
+.SYNOPSIS
     Prepend portable bootstrap tools (tools\windows-<arch>) to the process
     PATH when the directory ships beside this script.
 #>
@@ -147,10 +337,10 @@ function Ensure-BootstrapTools {
         }
     }
     else {
-        Install-WinGetPackage -Id "Git.Git" -Command "git.exe"
-        Install-WinGetPackage -Id "twpayne.chezmoi" -Command "chezmoi.exe"
-        Install-WinGetPackage -Id "Nushell.Nushell" -Command "nu.exe"
-        Install-WinGetPackage -Id "jdx.mise" -Command "mise.exe"
+        foreach ($tool in Get-BootstrapContract) {
+            Install-WinGetPackage -Id $tool.Id -Command $tool.Command
+        }
+        Update-OutdatedBootstrapTools
     }
 }
 
