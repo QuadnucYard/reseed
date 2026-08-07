@@ -8,7 +8,7 @@ use state.nu [complete-stage fail-stage load-checkpoint stage-done]
 use git.nu [git-bundle git-commit git-init git-pull git-status]
 use ../integrations/chezmoi.nu [chezmoi-backup chezmoi-restore chezmoi-status chezmoi-verify]
 use ../integrations/bootstrap.nu [bootstrap-status bootstrap-verify]
-use ../integrations/homebrew.nu [homebrew-backup homebrew-reconcile homebrew-restore homebrew-status homebrew-update homebrew-verify]
+use ../integrations/homebrew.nu [homebrew-backup homebrew-persist-env homebrew-reconcile homebrew-restore homebrew-status homebrew-update homebrew-verify]
 use ../integrations/kopia.nu [kopia-backup kopia-restore kopia-status kopia-verify]
 use ../integrations/mise.nu [mise-reconcile mise-restore mise-status mise-update mise-verify]
 use ../integrations/tooling.nu [tooling-backup tooling-observe]
@@ -208,6 +208,9 @@ export def workflow-restore [
       mise-restore $root $config --dry-run=$dry_run
     } --dry-run=$dry_run)
   }
+  # Keep interactive Homebrew usage on the configured mirrors, outside of
+  # Reseed runs, by regenerating the shell snippets from the loaded config.
+  homebrew-persist-env $config --dry-run=$dry_run
   $checkpoint = (execute-stage $config $checkpoint configuration {
     chezmoi-restore $root $config --dry-run=$dry_run
   } --dry-run=$dry_run)
@@ -266,6 +269,7 @@ export def workflow-update [
   check-config $root $effective
   winget-update $root $effective --dry-run=$dry_run
   homebrew-update $root $effective --dry-run=$dry_run
+  homebrew-persist-env $effective --dry-run=$dry_run
   mise-update $root $effective --dry-run=$dry_run
   chezmoi-restore $root $effective --dry-run=$dry_run
   if $dry_run { info "would run verification checks" } else { workflow-verify $root $effective }

@@ -137,12 +137,36 @@ def validate-software [
     let settings = ($software | get -o $manager | default {})
     if ($settings.enabled? | default false) {
       $issues = ($issues | append (validate-desired-files $root $manager $settings))
+      if $manager == "homebrew" {
+        $issues = ($issues | append (validate-homebrew-settings $settings))
+      }
       if $manager == "mise" {
         $issues = ($issues | append (validate-mise $root $settings))
       }
     }
   }
   $issues
+}
+
+# Validate the Homebrew settings: the optional env record (used to route
+# brew, taps, and bottles through a mirror) must contain string values.
+def validate-homebrew-settings [
+  settings: record # Homebrew manager settings.
+]: nothing -> list<record> {
+  let environment = ($settings.env? | default null)
+  if $environment == null { return [] }
+  if (($environment | describe) !~ '^record') {
+    return [{level: error area: homebrew message: "software.homebrew.env must be a record of environment variable names to values"}]
+  }
+  let invalid = ($environment | transpose key value | where {|entry| ($entry.value | describe) != "string" })
+  if ($invalid | is-not-empty) {
+    return [{level: error area: homebrew message: $"software.homebrew.env values must be strings; fix: (($invalid | get key | str join ', '))"}]
+  }
+  let invalid_names = ($environment | columns | where {|name| $name !~ '^[A-Za-z_][A-Za-z0-9_]*$' })
+  if ($invalid_names | is-not-empty) {
+    return [{level: error area: homebrew message: $"software.homebrew.env names must be valid environment variable names; fix: (($invalid_names | str join ', '))"}]
+  }
+  []
 }
 
 # Validate existence (and, for winget and mise, the shape) of every

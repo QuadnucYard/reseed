@@ -71,6 +71,41 @@ module exposing status, restore, update, reconcile, and verify operations; it
 is then inserted into the explicit workflow stage where its dependencies are
 available.
 
+### Homebrew mirror environment
+
+When Homebrew cannot reach GitHub, set `software.homebrew.env` to a record of
+environment variables applied to every `brew` invocation the engine runs
+(restore, update, verify, backup, and reconcile). The USTC mirror, for
+example:
+
+```nuon
+homebrew: {
+  enabled: true
+  manifests: [packages/macos/Brewfile]
+  env: {
+    "HOMEBREW_API_DOMAIN": "https://mirrors.ustc.edu.cn/homebrew-bottles/api"
+    "HOMEBREW_BOTTLE_DOMAIN": "https://mirrors.ustc.edu.cn/homebrew-bottles"
+    "HOMEBREW_BREW_GIT_REMOTE": "https://mirrors.ustc.edu.cn/brew.git"
+    "HOMEBREW_CORE_GIT_REMOTE": "https://mirrors.ustc.edu.cn/homebrew-core.git"
+    "HOMEBREW_CASK_GIT_REMOTE": "https://mirrors.ustc.edu.cn/homebrew-cask.git"
+  }
+}
+```
+
+The engine never modifies Homebrew's own configuration; it only passes the
+environment per command, so removing the block restores official sources.
+
+To keep the mirror active in interactive shells (outside Reseed), every
+`reseed restore` and `reseed update` also regenerates snippets from this
+environment: `reseed-homebrew-env.nu` in the Nushell vendor autoload and
+`reseed-homebrew-env.fish` in `~/.config/fish/conf.d/` are loaded
+automatically by their shells, while
+`~/.local/share/reseed/shell/reseed-homebrew-env.sh` (POSIX) and
+`reseed-homebrew-env.ps1` (PowerShell) are sourced from a profile. Removing
+the `env` block deletes the snippets on the next run. A fresh `bootstrap.sh
+--homebrew-mirror` install prints the same variables as profile exports for
+the time before the first restore.
+
 ### Mise tool entries
 
 The `[tools]` table is a mise manifest. Each key is a mise tool or a

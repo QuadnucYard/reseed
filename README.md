@@ -135,6 +135,21 @@ The older `-Repository`/`--repository` spelling remains an alias for the private
 state repository. Credentials for cloning must already be available through
 SSH, a credential manager, or an interactive Git helper.
 
+When the network cannot reach GitHub (common in China), Homebrew bootstrap
+accepts `--homebrew-mirror ustc|tuna` to route the installer and package
+downloads through a China mirror, or `--brew-install-url URL` to point at a
+specific installer script. The installer download and its execution are
+bounded by timeouts, and a non-interactive install that needs an admin
+password retries interactively. Homebrew package downloads during later
+`reseed restore` runs use the mirrors configured in the private state's
+`software.homebrew.env` (see [customizing](docs/customizing.md)).
+
+The configured mirror is also persisted for interactive shells: every
+`reseed restore` and `reseed update` regenerates shell snippets that export
+the same environment. Nushell and Fish load them automatically; POSIX and
+PowerShell users source `~/.local/share/reseed/shell/reseed-homebrew-env.sh`
+(or `.ps1`) from their profile, exactly like the managed-tools adapters.
+
 ## Offline recovery
 
 Bundles contain separate committed `engine/` and `state/` snapshots plus

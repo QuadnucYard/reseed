@@ -2,7 +2,7 @@ use ../lib/config.nu [config-fingerprint deep-merge load-config parse-profiles v
 use ../lib/prelude.nu *
 use ../lib/workflow.nu [workflow-plan workflow-verification-tools]
 use ../integrations/bootstrap.nu [bootstrap-brew-items bootstrap-tools bootstrap-winget-ids]
-use ../integrations/homebrew.nu [brewfile-items native-brewfile-items]
+use ../integrations/homebrew.nu [brewfile-items homebrew-env homebrew-persist-env homebrew-shell-snippets native-brewfile-items]
 use ../integrations/managers/cargo_binstall.nu [cargo-binstall-packages]
 use ../integrations/mise.nu [mise-install-plan mise-reconcile]
 use ../integrations/managers/node/node_manager.nu [node-manager-entries node-manager-install-args node-manager-missing-packages node-manager-update-args node-package-record node-spec-parse node-yarn-major-version parse-bun-inventory parse-node-dependency-inventory parse-yarn-inventory]
@@ -136,6 +136,79 @@ def test-brewfile-manifests [
     'tap "homebrew/cask"'
   ] "Brewfile comments and blank lines"
   assert-equal (native-brewfile-items ($engine_root | path join "tests" "fixtures" "Brewfile.bootstrap")) ['brew "fish"'] "Brewfile filters bootstrap packages"
+}
+
+# Homebrew mirror environment wiring and its configuration validation.
+def test-homebrew-env [
+  state_root: path # Private state template root.
+] {
+  let config = (load-config $state_root [personal])
+  assert-equal (homebrew-env $config.software.homebrew) {} "homebrew env defaults to empty"
+  let mirrored = ($config | upsert software.homebrew.env {
+    "HOMEBREW_BOTTLE_DOMAIN": "https://mirrors.ustc.edu.cn/homebrew-bottles"
+    "HOMEBREW_API_DOMAIN": "https://mirrors.ustc.edu.cn/homebrew-bottles/api"
+  })
+  assert-true ((validate-config $state_root $mirrored) | is-empty) "homebrew env record validates"
+  assert-equal (homebrew-env $mirrored.software.homebrew).HOMEBREW_BOTTLE_DOMAIN "https://mirrors.ustc.edu.cn/homebrew-bottles" "homebrew env mirrors the configuration"
+  let invalid_env = ($config | upsert software.homebrew.env {HOMEBREW_BOTTLE_DOMAIN: [https]})
+  assert-true ((validate-config $state_root $invalid_env) | any {|issue| $issue.area == homebrew and ($issue.message | str contains "values must be strings") }) "homebrew env rejects non-string values"
+  let invalid_shape = ($config | upsert software.homebrew.env ["https://example.com"])
+  assert-true ((validate-config $state_root $invalid_shape) | any {|issue| $issue.area == homebrew and ($issue.message | str contains "must be a record") }) "homebrew env rejects non-record shapes"
+  let invalid_name = ($config | upsert software.homebrew.env {"FOO BAR": "https://example.com"})
+  assert-true ((validate-config $state_root $invalid_name) | any {|issue| $issue.area == homebrew and ($issue.message | str contains "valid environment variable names") }) "homebrew env rejects invalid variable names"
+}
+
+# Persistent Homebrew mirror snippets: one snippet per shell, each exporting
+# the configured environment, and none when the environment is empty.
+def test-homebrew-shell-snippets [
+  state_root: path # Private state template root.
+] {
+  let config = (load-config $state_root [personal])
+  let base_snippets = (homebrew-shell-snippets $config)
+  assert-equal ($base_snippets | length) 0 "no snippets without a Homebrew environment"
+  let mirrored = ($config | upsert software.homebrew.env {
+    "HOMEBREW_API_DOMAIN": "https://mirrors.ustc.edu.cn/homebrew-bottles/api"
+    "HOMEBREW_BOTTLE_DOMAIN": "https://mirrors.ustc.edu.cn/homebrew-bottles"
+    "HOMEBREW_TOKEN": "a'b"
+    "HOMEBREW_QUOTE": "a\"b"
+  })
+  let snippets = (homebrew-shell-snippets $mirrored)
+  assert-equal ($snippets | length) 4 "one snippet per shell"
+  # Dry runs must never create, modify, or delete snippet files, whether or
+  # not a previous real restore already wrote them.
+  let target = ($nu.home-dir | path join ".local" "share" "reseed" "shell" "reseed-homebrew-env.sh")
+  let before = (if ($target | path exists) { open --raw $target } else { null })
+  homebrew-persist-env $mirrored --dry-run
+  homebrew-persist-env $config --dry-run
+  let after = (if ($target | path exists) { open --raw $target } else { null })
+  assert-equal $after $before "persist dry-run leaves snippets untouched"
+  # A disabled Homebrew must also be side-effect free in dry-run (and would
+  # remove stale snippets on a real run).
+  let disabled = ($mirrored | upsert software.homebrew.enabled false)
+  homebrew-persist-env $disabled --dry-run
+  let after_disabled = (if ($target | path exists) { open --raw $target } else { null })
+  assert-equal $after_disabled $after "persist dry-run with disabled Homebrew leaves snippets untouched"
+  assert-equal ($snippets | get path | each {|path| $path | path basename }) [
+    reseed-homebrew-env.nu
+    reseed-homebrew-env.fish
+    reseed-homebrew-env.sh
+    reseed-homebrew-env.ps1
+  ] "snippet filenames"
+  assert-true (($snippets | get path | any {|path| ($path | path dirname | path basename) == "autoload" })) "Nushell snippet uses the vendor autoload"
+  assert-true (($snippets | get path | any {|path| ($path | path dirname | path basename) == "conf.d" })) "Fish snippet uses conf.d"
+  let all_lines = ($snippets | get lines | flatten)
+  assert-true ($all_lines | any {|line| $line == "$env.HOMEBREW_API_DOMAIN = \"https://mirrors.ustc.edu.cn/homebrew-bottles/api\"" }) "Nushell snippet exports the environment"
+  assert-true ($all_lines | any {|line| $line == "set -gx HOMEBREW_BOTTLE_DOMAIN 'https://mirrors.ustc.edu.cn/homebrew-bottles'" }) "Fish snippet exports the environment"
+  assert-true ($all_lines | any {|line| $line == "export HOMEBREW_BOTTLE_DOMAIN='https://mirrors.ustc.edu.cn/homebrew-bottles'" }) "POSIX snippet exports the environment"
+  assert-true ($all_lines | any {|line| $line == "$env:HOMEBREW_API_DOMAIN = 'https://mirrors.ustc.edu.cn/homebrew-bottles/api'" }) "PowerShell snippet exports the environment"
+  assert-true ($all_lines | any {|line| $line == "set -gx HOMEBREW_TOKEN 'a''b'" }) "Fish snippet escapes single quotes"
+  assert-true ($all_lines | any {|line| $line == "export HOMEBREW_TOKEN='a'\\''b'" }) "POSIX snippet escapes single quotes"
+  assert-true ($all_lines | any {|line| $line == "$env:HOMEBREW_TOKEN = 'a''b'" }) "PowerShell snippet escapes single quotes"
+  assert-true ($all_lines | any {|line| $line == "$env.HOMEBREW_TOKEN = \"a'b\"" }) "Nushell snippet keeps single quotes in double-quoted literals"
+  assert-true ($all_lines | any {|line| $line == "$env.HOMEBREW_QUOTE = \"a\\\"b\"" }) "Nushell snippet escapes double quotes"
+  assert-true ($all_lines | any {|line| $line == "set -gx HOMEBREW_QUOTE 'a\"b'" }) "Fish snippet keeps double quotes literal"
+  assert-true ($all_lines | any {|line| $line == "export HOMEBREW_QUOTE='a\"b'" }) "POSIX snippet keeps double quotes literal"
+  assert-true ($all_lines | any {|line| $line == "$env:HOMEBREW_QUOTE = 'a\"b'" }) "PowerShell snippet keeps double quotes literal"
 }
 
 # The ordered restore plan and its verification scope.
@@ -344,6 +417,8 @@ def main [] {
   test-cargo-binstall $engine_root $state_root
   test-winget-manifests $engine_root $state_root
   test-brewfile-manifests $engine_root $state_root
+  test-homebrew-env $state_root
+  test-homebrew-shell-snippets $state_root
   test-workflow-plan $state_root
   test-tooling-observations $engine_root $state_root
   test-mise-commands $state_root

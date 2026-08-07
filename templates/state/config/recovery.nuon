@@ -22,6 +22,15 @@
       manifests: [packages/macos/Brewfile]
       export_on_backup: false
       update: true
+      # Optional per-command environment for brew, e.g. a China mirror.
+      # To enable, uncomment and pick a mirror:
+      # env: {
+      #   "HOMEBREW_API_DOMAIN": "https://mirrors.ustc.edu.cn/homebrew-bottles/api"
+      #   "HOMEBREW_BOTTLE_DOMAIN": "https://mirrors.ustc.edu.cn/homebrew-bottles"
+      #   "HOMEBREW_BREW_GIT_REMOTE": "https://mirrors.ustc.edu.cn/brew.git"
+      #   "HOMEBREW_CORE_GIT_REMOTE": "https://mirrors.ustc.edu.cn/homebrew-core.git"
+      #   "HOMEBREW_CASK_GIT_REMOTE": "https://mirrors.ustc.edu.cn/homebrew-cask.git"
+      # }
     }
     mise: {
       enabled: true
