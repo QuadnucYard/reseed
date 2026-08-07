@@ -114,6 +114,24 @@ Nushell's entry files are under `%APPDATA%\nushell` on Windows and
 tokens before adding them. See [customizing](docs/customizing.md) and the
 [backup inventory](docs/backup-inventory.md).
 
+## Guided setup
+
+`reseed setup` walks through user identity, SSH keys, GitHub uploads, and
+commit signing. The full wizard covers everything; per-purpose subcommands
+run one area at a time:
+
+```powershell
+nu reseed.nu setup
+nu reseed.nu setup ssh
+nu reseed.nu setup gh
+nu reseed.nu setup gpg
+```
+
+Every run prints a dependency-ordered plan, skips steps that are already
+satisfied, and ends with a pass/fail summary. jj and GPG are optional features
+that default to on (`--no-jj`, `--no-gpg`). See the [guided setup](docs/setup.md)
+for purposes, host configuration, and security notes.
+
 ## New machine
 
 First obtain this general engine repository. Then let its bootstrap install the
@@ -189,3 +207,5 @@ See [recovery](docs/recovery.md) for stage ordering and resume behavior.
   integration.
 - [customizing](docs/customizing.md) and [backup inventory](docs/backup-inventory.md)
   describe the private state format and daily capture behavior.
+- [guided setup](docs/setup.md) documents the setup wizard, its purposes, and
+  the `setup` configuration section.

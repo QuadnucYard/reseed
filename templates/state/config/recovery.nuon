@@ -6,6 +6,21 @@
     branch: main
     remote: origin
   }
+  setup: {
+    ssh: {
+      # SSH key comment; defaults to the Git identity email.
+      comment: ""
+      # Hosts receiving the public key during "reseed setup ssh-remote".
+      # admin also appends the key to the admin allow list on the host.
+      # hosts: [
+      #   {user: "alice" host: "example.com" port: 22 admin: false os: "unix"}
+      # ]
+      hosts: []
+    }
+    gpg: {
+      key_type: ed25519
+    }
+  }
   chezmoi: {
     enabled: true
     apply_args: []

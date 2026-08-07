@@ -2,6 +2,7 @@
 
 use lib/config.nu [load-config parse-profiles]
 use lib/core.nu [expand-home]
+use lib/setup.nu [setup-wizard]
 use lib/workflow.nu [workflow-backup workflow-bundle workflow-init workflow-plan workflow-reconcile workflow-restore workflow-status workflow-update workflow-verify]
 
 # Absolute path of the directory containing this engine.
@@ -135,4 +136,89 @@ def "main bundle" [
 ] {
   let state = (resolved-state-root $state_root)
   workflow-bundle (engine-root) $state (resolved-config $state $profiles) $output --dry-run=$dry_run
+}
+
+# Run the guided setup wizard over identity, SSH keys, GitHub uploads, and GPG signing.
+def "main setup" [
+  --profiles (-p): string = "" # Comma-separated profiles; defaults to those configured in recovery.nuon.
+  --state-root (-s): string = "" # Private state directory; overrides RESEED_STATE_ROOT and ~/.local/share/reseed.
+  --yes (-y) # Apply all defaults without per-step prompts.
+  --dry-run # Show setup actions without changing the machine.
+  --no-gpg # Skip the GPG signing area.
+  --no-jj # Skip the jj area.
+] {
+  let state = (resolved-state-root $state_root)
+  setup-wizard $state (resolved-config $state $profiles) all --yes=$yes --dry-run=$dry_run --no-gpg=$no_gpg --no-jj=$no_jj
+}
+
+# Set up only the Git and jj user identity.
+def "main setup identity" [
+  --profiles (-p): string = "" # Comma-separated profiles; defaults to those configured in recovery.nuon.
+  --state-root (-s): string = "" # Private state directory; overrides RESEED_STATE_ROOT and ~/.local/share/reseed.
+  --yes (-y) # Apply all defaults without per-step prompts.
+  --dry-run # Show setup actions without changing the machine.
+  --no-jj # Skip the jj area.
+] {
+  let state = (resolved-state-root $state_root)
+  setup-wizard $state (resolved-config $state $profiles) identity --yes=$yes --dry-run=$dry_run --no-jj=$no_jj
+}
+
+# Set up the SSH agent and generate the default ed25519 key.
+def "main setup ssh-local" [
+  --profiles (-p): string = "" # Comma-separated profiles; defaults to those configured in recovery.nuon.
+  --state-root (-s): string = "" # Private state directory; overrides RESEED_STATE_ROOT and ~/.local/share/reseed.
+  --yes (-y) # Apply all defaults without per-step prompts.
+  --dry-run # Show setup actions without changing the machine.
+  --no-jj # Skip the jj area.
+] {
+  let state = (resolved-state-root $state_root)
+  setup-wizard $state (resolved-config $state $profiles) ssh-local --yes=$yes --dry-run=$dry_run --no-jj=$no_jj
+}
+
+# Install the public key on every configured host.
+def "main setup ssh-remote" [
+  --profiles (-p): string = "" # Comma-separated profiles; defaults to those configured in recovery.nuon.
+  --state-root (-s): string = "" # Private state directory; overrides RESEED_STATE_ROOT and ~/.local/share/reseed.
+  --yes (-y) # Apply all defaults without per-step prompts.
+  --dry-run # Show setup actions without changing the machine.
+  --no-jj # Skip the jj area.
+] {
+  let state = (resolved-state-root $state_root)
+  setup-wizard $state (resolved-config $state $profiles) ssh-remote --yes=$yes --dry-run=$dry_run --no-jj=$no_jj
+}
+
+# Set up local SSH keys, remote hosts, and connectivity tests.
+def "main setup ssh" [
+  --profiles (-p): string = "" # Comma-separated profiles; defaults to those configured in recovery.nuon.
+  --state-root (-s): string = "" # Private state directory; overrides RESEED_STATE_ROOT and ~/.local/share/reseed.
+  --yes (-y) # Apply all defaults without per-step prompts.
+  --dry-run # Show setup actions without changing the machine.
+  --no-jj # Skip the jj area.
+] {
+  let state = (resolved-state-root $state_root)
+  setup-wizard $state (resolved-config $state $profiles) ssh --yes=$yes --dry-run=$dry_run --no-jj=$no_jj
+}
+
+# Authenticate the GitHub CLI and upload the SSH key.
+def "main setup gh" [
+  --profiles (-p): string = "" # Comma-separated profiles; defaults to those configured in recovery.nuon.
+  --state-root (-s): string = "" # Private state directory; overrides RESEED_STATE_ROOT and ~/.local/share/reseed.
+  --yes (-y) # Apply all defaults without per-step prompts.
+  --dry-run # Show setup actions without changing the machine.
+  --no-jj # Skip the jj area.
+] {
+  let state = (resolved-state-root $state_root)
+  setup-wizard $state (resolved-config $state $profiles) gh --yes=$yes --dry-run=$dry_run --no-jj=$no_jj
+}
+
+# Set up GPG signing for Git and jj commits.
+def "main setup gpg" [
+  --profiles (-p): string = "" # Comma-separated profiles; defaults to those configured in recovery.nuon.
+  --state-root (-s): string = "" # Private state directory; overrides RESEED_STATE_ROOT and ~/.local/share/reseed.
+  --yes (-y) # Apply all defaults without per-step prompts.
+  --dry-run # Show setup actions without changing the machine.
+  --no-jj # Skip the jj area.
+] {
+  let state = (resolved-state-root $state_root)
+  setup-wizard $state (resolved-config $state $profiles) gpg --yes=$yes --dry-run=$dry_run --no-jj=$no_jj
 }

@@ -99,6 +99,7 @@ export def validate-config [
     (validate-state-sentinel $root)
     (validate-software $root $config)
     (validate-chezmoi $root $config)
+    (validate-setup $config)
   ] | flatten
 }
 
@@ -353,6 +354,48 @@ def validate-manager-manifest [
     }
     if not $supported {
       $issues = ($issues | append {level: error area: $manager message: $"Unsupported package specifier '($spec)' in ($relative); use name or ($spec_hint)"})
+    }
+  }
+  $issues
+}
+
+# Validate the optional setup section: SSH host entries must carry a user and
+# host, with optional numeric port, boolean admin flag, and a supported
+# host operating system.
+def validate-setup [
+  config: record # Loaded configuration.
+]: nothing -> list<record> {
+  let hosts = ((($config.setup? | default {}).ssh? | default {}).hosts? | default null)
+  if $hosts == null { return [] }
+  let hosts_kind = ($hosts | describe)
+  if not (($hosts_kind | str starts-with "list") or ($hosts_kind | str starts-with "table")) {
+    return [{level: error area: setup message: "setup.ssh.hosts must be a list of host records"}]
+  }
+  mut issues = []
+  for host in $hosts {
+    if ($host | describe) !~ '^record' {
+      $issues = ($issues | append {level: error area: setup message: "setup.ssh.hosts entries must be records with user and host"})
+      continue
+    }
+    let user = ($host.user? | default "")
+    let hostname = ($host.host? | default "")
+    if (($user | describe) != "string") or (($user | str trim) | is-empty) {
+      $issues = ($issues | append {level: error area: setup message: $"Setup host requires a non-empty user: (($host | to nuon))"})
+    }
+    if (($hostname | describe) != "string") or (($hostname | str trim) | is-empty) {
+      $issues = ($issues | append {level: error area: setup message: $"Setup host requires a non-empty host: (($host | to nuon))"})
+    }
+    let port = ($host.port? | default null)
+    if $port != null and (($port | describe) != "int") {
+      $issues = ($issues | append {level: error area: setup message: $"Setup host port must be an integer: (($host | to nuon))"})
+    }
+    let admin = ($host.admin? | default null)
+    if $admin != null and (($admin | describe) != "bool") {
+      $issues = ($issues | append {level: error area: setup message: $"Setup host admin must be a boolean: (($host | to nuon))"})
+    }
+    let os = ($host.os? | default null)
+    if $os != null and ((($os | describe) != "string") or ($os not-in ["windows" "macos" "unix"])) {
+      $issues = ($issues | append {level: error area: setup message: $"Setup host os must be windows, macos, or unix: (($host | to nuon))"})
     }
   }
   $issues

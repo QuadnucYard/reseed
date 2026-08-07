@@ -185,6 +185,13 @@ environment option instead of inventing its own tool-overlay semantics.
 Use profiles for roles such as `personal`, `work`, or `studio`. Platform
 selection is automatic, so a profile can be used on both Windows and macOS.
 
+## Guided setup
+
+The optional `setup` section drives `reseed setup`: which hosts receive the
+SSH public key, the key comment, and the GPG key type. See the
+[guided setup](setup.md) for the full configuration reference, admin allow
+list semantics, and the wizard behavior.
+
 ## Kopia
 
 Enable Kopia only for selected paths unsuitable for Git:

@@ -42,7 +42,9 @@ jobs:
           version: ${{ env.NU_VERSION }}
 
       - name: Run test suite
-        run: nu tests/run.nu
+        run: |
+          nu tests/run.nu
+          nu tests/setup.nu
 
       - name: CLI smoke test
         run: nu reseed.nu --help
