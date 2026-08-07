@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NU_VERSION: "0.114.1"
+
+jobs:
+  test:
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Windows
+            os: windows-latest
+            lint-bootstrap-ps1: true
+          - label: macOS
+            os: macos-latest
+          - label: Linux
+            os: ubuntu-latest
+            syntax-check-bootstrap-sh: true
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Nushell ${{ env.NU_VERSION }}
+        uses: hustcer/setup-nu@v3.26
+        with:
+          version: ${{ env.NU_VERSION }}
+
+      - name: Run test suite
+        run: nu tests/run.nu
+
+      - name: CLI smoke test
+        run: nu reseed.nu --help
+
+      - name: Plan against the state template
+        run: nu reseed.nu plan --state-root templates/state
+
+      - name: Bundle dry run
+        run: nu reseed.nu bundle --state-root templates/state --dry-run
+
+      - name: Syntax-check bootstrap.sh
+        if: matrix.syntax-check-bootstrap-sh
+        run: sh -n bootstrap.sh && sh bootstrap.sh --help
+
+      - name: Lint bootstrap.ps1 with PSScriptAnalyzer
+        if: matrix.lint-bootstrap-ps1
+        shell: pwsh
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+          $issues = Invoke-ScriptAnalyzer -Path bootstrap.ps1 -Severity Warning
+          if ($issues) { $issues | Format-Table -AutoSize | Out-String -Width 200 | Write-Output }
+          $errors = @($issues | Where-Object { $_.Severity -eq "Error" })
+          if ($errors.Count -gt 0) { exit 1 }
