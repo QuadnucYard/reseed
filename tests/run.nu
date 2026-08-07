@@ -4,7 +4,7 @@ use ../lib/config.nu [config-fingerprint deep-merge load-config parse-profiles v
 use ../lib/prelude.nu *
 use ../lib/workflow.nu [workflow-plan workflow-verification-tools]
 use ../integrations/bootstrap.nu [bootstrap-brew-items bootstrap-outdated bootstrap-tools bootstrap-winget-ids parse-brew-outdated parse-winget-upgrade-table]
-use ../integrations/homebrew.nu [brewfile-items homebrew-env homebrew-persist-env homebrew-shell-snippets native-brewfile-items]
+use ../integrations/homebrew.nu [brewfile-items brewfile-summary homebrew-env homebrew-mirror-label homebrew-persist-env homebrew-shell-snippets native-brewfile-items parse-outdated-names]
 use ../integrations/managers/cargo_binstall.nu [cargo-binstall-packages]
 use ../integrations/mise.nu [mise-install-plan mise-reconcile]
 use ../integrations/managers/node/node_manager.nu [node-manager-entries node-manager-install-args node-manager-missing-packages node-manager-update-args node-package-record node-spec-parse node-yarn-major-version parse-bun-inventory parse-node-dependency-inventory parse-yarn-inventory]
@@ -145,6 +145,14 @@ def test-brewfile-manifests [
     'tap "homebrew/cask"'
   ] "Brewfile comments and blank lines"
   assert eq (native-brewfile-items ($engine_root | path join "tests" "fixtures" "Brewfile.bootstrap")) ['brew "fish"'] "Brewfile filters bootstrap packages"
+  assert eq (brewfile-summary ($state_root | path join "packages" "macos" "Brewfile")) "1 formula" "Brewfile summary counts formulas"
+  assert eq (brewfile-summary ($engine_root | path join "tests" "fixtures" "Brewfile.comments")) "1 formula, 1 cask, 1 tap" "Brewfile summary counts every kind"
+  assert eq (brewfile-summary ($engine_root | path join "tests" "fixtures" "Brewfile.empty")) "0 entries" "Brewfile summary of an empty file"
+  assert eq (parse-outdated-names "git 2.47.1 < 2.48.0\nfish 3.7.1 < 3.7.2" [git fish]) [git fish] "outdated names parse the old format"
+  assert eq (parse-outdated-names "git (installed: 2.47.1) != 2.48.0" [git]) [git] "outdated names parse the new format"
+  assert eq (parse-outdated-names "git 2.47.1 < 2.48.0\nfish 3.7.1 < 3.7.2" [fish]) [fish] "outdated names filter to the requested packages"
+  assert eq (parse-outdated-names "" [git]) [] "outdated names of empty output"
+  assert eq (parse-outdated-names "git 2.47.1 < 2.48.0" []) [] "outdated names without requested packages"
 }
 
 # Homebrew mirror environment wiring and its configuration validation.
@@ -153,6 +161,11 @@ def test-homebrew-env [
 ] {
   let config = (load-config $state_root [personal])
   assert eq (homebrew-env $config.software.homebrew) {} "homebrew env defaults to empty"
+  assert eq (homebrew-mirror-label {}) "" "no mirror label without a Homebrew environment"
+  assert eq (homebrew-mirror-label {HOMEBREW_BOTTLE_DOMAIN: "https://mirrors.ustc.edu.cn/homebrew-bottles"}) "ustc (mirrors.ustc.edu.cn)" "ustc mirror label"
+  assert eq (homebrew-mirror-label {HOMEBREW_BOTTLE_DOMAIN: "https://mirrors.tuna.tsinghua.edu.cn/homebrew-bottles"}) "tuna (mirrors.tuna.tsinghua.edu.cn)" "tuna mirror label"
+  assert eq (homebrew-mirror-label {HOMEBREW_API_DOMAIN: "https://mirrors.ustc.edu.cn/homebrew-bottles/api"}) "ustc (mirrors.ustc.edu.cn)" "mirror label recognizes any mirror variable"
+  assert eq (homebrew-mirror-label {HOMEBREW_BOTTLE_DOMAIN: "https://mirrors.example.com/bottles"}) "custom (https://mirrors.example.com/bottles)" "custom mirror label"
   let mirrored = ($config | upsert software.homebrew.env {
     "HOMEBREW_BOTTLE_DOMAIN": "https://mirrors.ustc.edu.cn/homebrew-bottles"
     "HOMEBREW_API_DOMAIN": "https://mirrors.ustc.edu.cn/homebrew-bottles/api"

@@ -29,6 +29,27 @@ def quote-env-value [
   }
 }
 
+# Friendly label for the mirror configured through software.homebrew.env, or
+# "" when no mirror environment is set. Recognizes the USTC and TUNA mirror
+# hosts; any other configured domain is reported as a custom mirror.
+export def homebrew-mirror-label [
+  environment: record # Homebrew environment from the settings.
+]: nothing -> string {
+  let domains = ([HOMEBREW_BOTTLE_DOMAIN HOMEBREW_API_DOMAIN HOMEBREW_BREW_GIT_REMOTE HOMEBREW_CORE_GIT_REMOTE HOMEBREW_CASK_GIT_REMOTE]
+    | each {|key| $environment | get -o $key | default "" }
+    | where {|value| not ($value | is-empty) }
+    | uniq)
+  if ($domains | is-empty) {
+    ""
+  } else if ($domains | any {|value| $value | str contains "mirrors.ustc.edu.cn" }) {
+    "ustc (mirrors.ustc.edu.cn)"
+  } else if ($domains | any {|value| $value | str contains "mirrors.tuna.tsinghua.edu.cn" }) {
+    "tuna (mirrors.tuna.tsinghua.edu.cn)"
+  } else {
+    $"custom \((($domains | first))\)"
+  }
+}
+
 # The four persistent snippet destinations, shared by generation and
 # stale-removal so the paths cannot drift.
 def homebrew-env-snippet-paths []: nothing -> list<path> {
@@ -145,6 +166,26 @@ export def native-brewfile-items [
   brewfile-items $path | where {|item| $item not-in (bootstrap-brew-items) }
 }
 
+# Short summary of a Brewfile's declared entries, e.g. "2 formulas, 1 cask".
+export def brewfile-summary [
+  path: path # Brewfile path.
+]: nothing -> string {
+  let items = (brewfile-items $path)
+  if ($items | is-empty) { return "0 entries" }
+  let kinds = [
+    {prefix: brew label: formula plural: formulas}
+    {prefix: cask label: cask plural: casks}
+    {prefix: tap label: tap plural: taps}
+    {prefix: mas label: app plural: apps}
+    {prefix: vscode label: extension plural: extensions}
+  ]
+  let parts = ($kinds | each {|kind|
+    let count = ($items | where {|item| $item | str starts-with $"($kind.prefix) \"" } | length)
+    if $count > 0 { $"($count) (if $count == 1 { $kind.label } else { $kind.plural })" } else { null }
+  } | compact)
+  if ($parts | is-empty) { "0 entries" } else { $parts | str join ", " }
+}
+
 # Availability and desired-manifest health for the Homebrew integration.
 export def homebrew-status [
   root: path # Private state root.
@@ -161,6 +202,19 @@ export def homebrew-status [
   }
 }
 
+# Echo the active Homebrew mirror and the environment variables that route
+# brew through it. Prints nothing when no mirror environment is configured.
+def show-homebrew-mirror [
+  environment: record # Homebrew environment from the settings.
+] {
+  let mirror = (homebrew-mirror-label $environment)
+  if ($mirror | is-empty) { return }
+  info $"Homebrew mirror: ($mirror)"
+  for entry in ($environment | transpose key value | where {|entry| $entry.key | str starts-with "HOMEBREW_" } | sort-by key) {
+    info $"  ($entry.key)=($entry.value)"
+  }
+}
+
 # Install every configured Brewfile.
 export def homebrew-restore [
   root: path # Private state root.
@@ -171,9 +225,11 @@ export def homebrew-restore [
   if not ($settings.enabled? | default false) or ((detect-os) != "macos") { return }
   if not (command-exists brew) and not $dry_run { error make {msg: "Homebrew is required for the macOS package stage"} }
   let environment = (homebrew-env $settings)
+  show-homebrew-mirror $environment
   for manifest in ($settings.manifests? | default []) {
     let path = ($root | path join $manifest)
-    run-command brew ["bundle" "install" $"--file=($path)"] --environment=$environment --dry-run=$dry_run | ignore
+    info $"installing Homebrew packages from ($manifest) ((brewfile-summary $path))"
+    run-command brew ["bundle" "install" "--verbose" $"--file=($path)"] --environment=$environment --dry-run=$dry_run | ignore
   }
 }
 
@@ -188,21 +244,47 @@ export def homebrew-update [
   if not ($settings.enabled? | default false) or not ($settings.update? | default true) or ((detect-os) != "macos") { return }
   if not (command-exists brew) { warning "Homebrew is unavailable; skipping macOS package updates"; return }
   let environment = (homebrew-env $settings)
-  let mirror = (homebrew-mirror-label $environment)
-  if ($mirror | is-not-empty) { info $"Homebrew mirror: ($mirror)" }
+  show-homebrew-mirror $environment
   run-command brew ["update"] --environment=$environment --dry-run=$dry_run | ignore
   for manifest in ($settings.manifests? | default []) {
     let path = ($root | path join $manifest)
-    info $"installing Homebrew packages from ($manifest)"
-    run-command brew ["bundle" "install" $"--file=($path)"] --environment=$environment --dry-run=$dry_run | ignore
+    info $"installing Homebrew packages from ($manifest) ((brewfile-summary $path))"
+    run-command brew ["bundle" "install" "--verbose" $"--file=($path)"] --environment=$environment --dry-run=$dry_run | ignore
     for kind in [brews casks] {
       upgrade-brewfile-kind $path $kind $environment --dry-run=$dry_run
     }
   }
 }
 
+# Parse "brew outdated" output for the requested packages into their names,
+# accepting both brew formats ("name installed < available" and
+# "name (installed: x) != y"). Exported for tests.
+export def parse-outdated-names [
+  text: string # Raw "brew outdated" output.
+  names: list<string> # Package names to report.
+]: nothing -> list<string> {
+  $text
+    | lines
+    | each {|line| $line | str trim | split row " " | get -o 0 | default "" }
+    | where {|name| ($name | is-not-empty) and ($name in $names) }
+    | uniq
+}
+
+# Packages among the given names that brew reports as outdated. Empty when
+# the check cannot run or nothing is outdated.
+def brew-outdated-names [
+  environment: record # Homebrew environment from the settings.
+  kind: string # "brews" or "casks".
+  names: list<string> # Package names to check.
+]: nothing -> list<string> {
+  let flag = if $kind == "casks" { "--cask" } else { "--formula" }
+  let result = (run-command brew (["outdated" $flag] | append $names) --allow-failure --environment=$environment --capture)
+  if $result.exit_code == 127 { [] } else { parse-outdated-names $result.stdout $names }
+}
+
 # Upgrade one kind of package (brews or casks) declared in a Brewfile,
-# skipping anything the bootstrap contract owns.
+# skipping anything the bootstrap contract owns. Only packages brew reports
+# as outdated are upgraded, so the summary counts are accurate.
 def upgrade-brewfile-kind [
   path: path # Brewfile path.
   kind: string # "brews" or "casks".
@@ -218,11 +300,16 @@ def upgrade-brewfile-kind [
     | default [])
   let names = ($names | where {|name| $name not-in $ignored_names })
   if ($names | is-not-empty) {
-    let args = if $kind == "casks" { ["upgrade" "--cask"] | append $names } else { ["upgrade"] | append $names }
+    let outdated = (brew-outdated-names $environment $kind $names)
+    if ($outdated | is-empty) { return }
+    let args = if $kind == "casks" { ["upgrade" "--cask"] | append $outdated } else { ["upgrade"] | append $outdated }
+    info $"upgrading ($outdated | length) ($kind)"
     let upgraded = (run-command brew $args --allow-failure --environment=$environment)
     if $upgraded.exit_code != 0 {
       let stderr = ($upgraded.stderr | str trim)
       warning (if ($stderr | is-empty) { $"Some Homebrew ($kind) updates failed" } else { $"Some Homebrew ($kind) updates failed: ($stderr)" })
+    } else {
+      info $"upgraded ($outdated | length) ($kind)"
     }
   }
 }
