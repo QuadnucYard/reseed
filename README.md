@@ -186,7 +186,11 @@ into the existing root without re-running the whole bootstrap. It adopts a
 template seed directly and refuses to overwrite local commits or uncommitted
 changes unless you pass `--replace`. The bootstraps' `--state-repository` flag
 is the equivalent one-step path when the repository is available at bootstrap
-time.
+time. A seed that lost a file (for example an interrupted seed missing
+`config/recovery.nuon`) repairs itself: re-running `reseed init` re-seeds any
+missing template files into the uncommitted seed, so `reseed setup` and
+`reseed restore` can run even before the private repository is reachable.
+Committed private state is never re-seeded.
 
 When the network cannot reach GitHub (common in China), Homebrew bootstrap
 accepts `--homebrew-mirror ustc|tuna` to route the installer and package

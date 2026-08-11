@@ -889,6 +889,37 @@ def test-init-adopt [
   }
 }
 
+# An incomplete, uncommitted seed is healed on re-init (missing template files
+# are re-seeded, including nested config), while committed private state is
+# left untouched so a deliberate file removal survives.
+def test-init-reseeds-incomplete-seed [
+  engine_root: path # Engine root providing the template.
+] {
+  if not (command-exists git) { return }
+  with-temp-dir "reseed-reseed-test.XXXXXXXX" {|sandbox|
+    # An unborn seed that lost config/recovery.nuon is healed by re-init.
+    let seed = ($sandbox | path join "seed")
+    workflow-init $engine_root $seed []
+    rm ($seed | path join "config" "recovery.nuon")
+    rm ($seed | path join "mise.toml")
+    assert (not (($seed | path join "config" "recovery.nuon") | path exists)) "fixture seed is incomplete"
+    workflow-init $engine_root $seed []
+    assert (($seed | path join "config" "recovery.nuon") | path exists) "re-init re-seeds missing config/recovery.nuon"
+    assert (($seed | path join "mise.toml") | path exists) "re-init re-seeds missing mise.toml"
+
+    # Committed state is respected: missing template files are not re-added.
+    let committed = ($sandbox | path join "committed")
+    workflow-init $engine_root $committed []
+    run-command git ["-C" ($committed | into string) "config" "user.email" "reseed@example.com"] --quiet | ignore
+    run-command git ["-C" ($committed | into string) "config" "user.name" "Reseed Test"] --quiet | ignore
+    run-command git ["-C" ($committed | into string) "add" "--all"] --quiet | ignore
+    run-command git ["-C" ($committed | into string) "commit" "-m" "seed"] --quiet | ignore
+    rm ($committed | path join "config" "profiles" "work.nuon.example")
+    workflow-init $engine_root $committed []
+    assert (not (($committed | path join "config" "profiles" "work.nuon.example") | path exists)) "committed state is not re-seeded"
+  }
+}
+
 def main [] {
   let engine_root = ($env.FILE_PWD | path dirname)
   let state_root = ($engine_root | path join "templates" "state")
@@ -918,6 +949,7 @@ def main [] {
   test-shell-generator-preflight $engine_root $state_root
   test-git-sync
   test-init-adopt $engine_root
+  test-init-reseeds-incomplete-seed $engine_root
 
   print "All Reseed tests passed"
 }

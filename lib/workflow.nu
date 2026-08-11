@@ -2,7 +2,7 @@
 # reseed workflows: init, plan, status, restore, backup, update, reconcile,
 # verify, and bundle.
 
-use core.nu [confirm detect-os fail info state-sentinel-exists warning]
+use core.nu [command-exists confirm detect-os fail info run-command state-sentinel-exists warning]
 use config.nu [config-fingerprint load-config validate-config]
 use state.nu [complete-stage fail-stage load-checkpoint stage-done]
 use git.nu [git-bundle git-commit git-init git-pull git-status git-sync]
@@ -33,8 +33,56 @@ def state-template [
   $engine_root | path join "templates" "state"
 }
 
+# True when the state root is not a repository or has no commits yet, i.e. it
+# is a template scaffold rather than committed private state.
+def state-uncommitted [
+  state_root: path # Private state root.
+]: nothing -> bool {
+  if not (command-exists git) { return true }
+  let probe = (run-command git ["-C" ($state_root | into string) "rev-parse" "--verify" "HEAD"] --allow-failure --quiet --capture)
+  $probe.exit_code != 0
+}
+
+# Copy template files missing from an already-initialized state root, so a
+# partial or interrupted seed (for example one lacking config/recovery.nuon)
+# still runs setup and restore. Never overwrites existing files; the home/
+# chezmoi source, which is applied to the machine, is left alone. Existing
+# directories are recursed into so missing nested files are healed too.
+def seed-missing-files [
+  template: path # Engine state template.
+  state_root: path # Private state root.
+  --dry-run # Report the copies without writing them.
+] {
+  for entry in (ls --all $template) {
+    let relative = ($entry.name | path basename)
+    if $relative == "home" { continue }
+    let target = ($state_root | path join $relative)
+    if ($entry.type == dir) {
+      if not ($target | path exists) {
+        if $dry_run {
+          info $"would seed template file to state: ($relative)"
+        } else {
+          cp --recursive $entry.name $target
+          info $"seeded template file to state: ($relative)"
+        }
+      } else {
+        seed-missing-files $entry.name $target --dry-run=$dry_run
+      }
+    } else if not ($target | path exists) {
+      if $dry_run {
+        info $"would seed template file to state: ($relative)"
+      } else {
+        cp --recursive $entry.name $target
+        info $"seeded template file to state: ($relative)"
+      }
+    }
+  }
+}
+
 # Seed the private state root from the engine template. Refuses a nonempty
-# directory without the sentinel, and never re-seeds an initialized root.
+# directory without the sentinel. An initialized root that has no commits (a
+# template scaffold) is re-seeded for any missing template files so an
+# incomplete seed repairs itself; committed private state is left untouched.
 def ensure-state-root [
   engine_root: path # Engine directory providing the template.
   state_root: path # Private state root to seed.
@@ -47,7 +95,12 @@ def ensure-state-root [
     if ($entries | is-not-empty) and not (state-sentinel-exists $state_root) {
       fail $"Refusing nonempty directory without .reseed-state: ($state_root)"
     }
-    if (state-sentinel-exists $state_root) { return }
+    if (state-sentinel-exists $state_root) {
+      if (state-uncommitted $state_root) {
+        seed-missing-files $template $state_root --dry-run=$dry_run
+      }
+      return
+    }
   }
 
   if $dry_run {
