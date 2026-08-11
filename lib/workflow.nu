@@ -230,11 +230,11 @@ export def workflow-restore [
   $checkpoint = (execute-stage $config $checkpoint macos-finder {
     finder-restore $engine_root $root $config --dry-run=$dry_run
   } --dry-run=$dry_run)
-  # Keep interactive Homebrew usage on the configured mirrors, outside of
-  # Reseed runs, by regenerating the shell snippets from the loaded config.
-  homebrew-persist-env $config --dry-run=$dry_run
   $checkpoint = (execute-stage $config $checkpoint configuration {
     chezmoi-restore $root $config --dry-run=$dry_run
+    # Regenerate generated shell init code only after chezmoi applies the home
+    # state, so apply cannot overwrite the loader blocks and snippets.
+    homebrew-persist-env $config --dry-run=$dry_run
     if not $skip_software { mise-configure-shells $root $config --dry-run=$dry_run }
   } --dry-run=$dry_run)
   $checkpoint = (execute-stage $config $checkpoint snapshots {
@@ -303,10 +303,10 @@ export def workflow-update [
   check-config $root $effective
   winget-update $root $effective --dry-run=$dry_run
   homebrew-update $root $effective --dry-run=$dry_run
-  homebrew-persist-env $effective --dry-run=$dry_run
   mise-update $root $effective --dry-run=$dry_run
   finder-restore $engine_root $root $effective --dry-run=$dry_run
   chezmoi-restore $root $effective --dry-run=$dry_run
+  homebrew-persist-env $effective --dry-run=$dry_run
   mise-configure-shells $root $effective --dry-run=$dry_run
   if $dry_run { info "would run verification checks" } else { workflow-verify $root $effective }
   info "Managed update completed"
