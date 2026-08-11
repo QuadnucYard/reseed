@@ -1,7 +1,7 @@
 # Desired-state handling: base configuration loading with profile overlays
 # (deep-merge), validation of every desired-state file, and state fingerprinting.
 
-use core.nu [fail require-file]
+use core.nu [fail require-file state-sentinel-exists]
 use mise.nu [mise-missing-backend-dependencies]
 use ../integrations/managers/node/node_manager.nu [node-spec-parse]
 use ../integrations/managers/uv.nu [uv-spec-parse]
@@ -107,7 +107,7 @@ export def validate-config [
 def validate-state-sentinel [
   root: path # Private state root.
 ]: nothing -> list<record> {
-  if not (($root | path join ".reseed-state") | path exists) {
+  if not (state-sentinel-exists $root) {
     [{level: error area: state message: "Private state is missing .reseed-state"}]
   } else {
     []

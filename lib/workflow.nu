@@ -2,7 +2,7 @@
 # reseed workflows: init, plan, status, restore, backup, update, reconcile,
 # verify, and bundle.
 
-use core.nu [confirm detect-os fail info warning]
+use core.nu [confirm detect-os fail info state-sentinel-exists warning]
 use config.nu [config-fingerprint load-config validate-config]
 use state.nu [complete-stage fail-stage load-checkpoint stage-done]
 use git.nu [git-bundle git-commit git-init git-pull git-status git-sync]
@@ -33,13 +33,6 @@ def state-template [
   $engine_root | path join "templates" "state"
 }
 
-# Sentinel file marking a directory as initialized private state.
-def state-sentinel [
-  state_root: path # Private state root.
-]: nothing -> path {
-  $state_root | path join ".reseed-state"
-}
-
 # Seed the private state root from the engine template. Refuses a nonempty
 # directory without the sentinel, and never re-seeds an initialized root.
 def ensure-state-root [
@@ -51,10 +44,10 @@ def ensure-state-root [
   if not ($template | path exists) { fail $"State template is missing: ($template)" }
   if ($state_root | path exists) {
     let entries = (ls --all $state_root)
-    if ($entries | is-not-empty) and not ((state-sentinel $state_root) | path exists) {
+    if ($entries | is-not-empty) and not (state-sentinel-exists $state_root) {
       fail $"Refusing nonempty directory without .reseed-state: ($state_root)"
     }
-    if ((state-sentinel $state_root) | path exists) { return }
+    if (state-sentinel-exists $state_root) { return }
   }
 
   if $dry_run {
@@ -113,7 +106,7 @@ export def workflow-init [
 ] {
   ensure-state-root $engine_root $state_root --dry-run=$dry_run
   sync-engine-files $engine_root $state_root --dry-run=$dry_run
-  let config_root = if ((state-sentinel $state_root) | path exists) { $state_root } else { state-template $engine_root }
+  let config_root = if (state-sentinel-exists $state_root) { $state_root } else { state-template $engine_root }
   let config = (load-config $config_root $profiles)
   check-config $config_root $config
   git-init $state_root $config --remote-url=$remote_url --dry-run=$dry_run

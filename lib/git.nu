@@ -1,7 +1,7 @@
 # Private state repository operations (status, init, pull, commit) and the
 # offline source bundle builder.
 
-use core.nu [command-exists detect-os expand-home fail info run-command scrub-url warning]
+use core.nu [command-exists detect-os expand-home fail info run-command scrub-url state-sentinel-exists warning]
 
 # Probe whether the private state root is a clean Git repository and, when it
 # is, report the current branch.
@@ -135,7 +135,7 @@ export def git-sync [
     # the provided state so its files are copied in and the root becomes
     # git-managed. git init touches no files; reset --hard replaces only files
     # the provided repository owns and keeps non-colliding untracked files.
-    if (($root | path join ".reseed-state") | path exists) {
+    if (state-sentinel-exists $root) {
       validate-source $repository
       run-command git ["-C" ($root | into string) "init" "-b" "main"] | ignore
       run-command git ["-C" ($root | into string) "remote" "add" "origin" $repository] --quiet | ignore

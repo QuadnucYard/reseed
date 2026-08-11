@@ -54,6 +54,20 @@ export def expand-home [
   $expanded | path expand --no-symlink
 }
 
+# Path of the .reseed-state sentinel that marks an initialized private state root.
+export def state-sentinel [
+  root: path # Private state root.
+]: nothing -> path {
+  $root | path join ".reseed-state"
+}
+
+# True when the private state root carries the .reseed-state sentinel.
+export def state-sentinel-exists [
+  root: path # Private state root.
+]: nothing -> bool {
+  (state-sentinel $root) | path exists
+}
+
 # Redact the userinfo of URLs so credentials never appear in logs or errors.
 # Matches "scheme://anything-without-/@-or-space@" and replaces the userinfo
 # (including a possible password) with ***.
