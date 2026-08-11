@@ -77,12 +77,41 @@ export def git-init [
   info $"Reseed source repository: ($root)"
 }
 
+# Fail when the provided source is not a readable Git repository with a main
+# branch, so a bad URL fails before it can pollute the configured origin.
+def validate-source [
+  repository: string # Private state repository URL.
+] {
+  let remote_refs = (run-command git ["ls-remote" $repository] --allow-failure --quiet --capture)
+  if $remote_refs.exit_code != 0 {
+    fail $"Cannot read the private state repository: (scrub-url $repository)"
+  }
+  if not ($remote_refs.stdout | lines | any {|line| $line | str ends-with "refs/heads/main" }) {
+    fail $"The private state repository has no main branch: (scrub-url $repository)"
+  }
+}
+
+# Add the provided repository as origin when the state was seeded without one.
+def configure-origin [
+  root: path # Private state root.
+  repository: string # Private state repository URL.
+  missing: bool # True when no origin remote is configured yet.
+] {
+  if $missing {
+    run-command git ["-C" ($root | into string) "remote" "add" "origin" $repository] --quiet | ignore
+  }
+}
+
 # Fast-forward the already-initialized private state from the provided
 # repository, so the platform bootstraps restore from the supplied source even
 # when the state root was seeded or cloned earlier. Refuses to sync a local
-# clone whose origin points at a different repository, configures origin when
-# the state was seeded without a remote, and leaves a dirty or diverged working
-# tree untouched so recovery is never blocked by local changes.
+# clone whose origin points at a different repository, validates that the
+# provided source is a readable Git repository with a main branch before
+# configuring it (so a bad source never pollutes origin), and leaves a dirty or
+# diverged working tree untouched so recovery is never blocked by local changes.
+# A template-seeded root that has never been committed (unborn branch) adopts
+# the provided state wholesale, replacing its colliding scaffold files while
+# keeping any non-colliding untracked files.
 export def git-sync [
   root: path # Private state root.
   repository: string # Private state repository URL.
@@ -94,19 +123,29 @@ export def git-sync [
     return
   }
   let existing = (run-command git ["-C" ($root | into string) "remote" "get-url" "origin"] --allow-failure --quiet --capture)
-  if $existing.exit_code == 0 {
+  let origin_missing = ($existing.exit_code != 0)
+  if not $origin_missing {
     let current = ($existing.stdout | str trim)
     if $current != $repository {
       fail $"Git remote 'origin' already points to (scrub-url $current); refusing to sync from (scrub-url $repository)"
     }
-  } else {
-    run-command git ["-C" ($root | into string) "remote" "add" "origin" $repository] --quiet | ignore
+  }
+  let unborn = (run-command git ["-C" ($root | into string) "rev-parse" "--verify" "HEAD"] --allow-failure --quiet --capture)
+  if $unborn.exit_code != 0 {
+    validate-source $repository
+    configure-origin $root $repository $origin_missing
+    run-command git ["-C" ($root | into string) "fetch" "origin" "main"] | ignore
+    run-command git ["-C" ($root | into string) "reset" "--hard" "origin/main"] | ignore
+    info $"Adopted the provided private state over the uncommitted local seed: (scrub-url $repository)"
+    return
   }
   let dirty = (run-command git ["-C" ($root | into string) "status" "--porcelain"] --quiet --capture)
   if not ($dirty.stdout | str trim | is-empty) {
     warning "Private state has local changes; leaving it unchanged"
     return
   }
+  validate-source $repository
+  configure-origin $root $repository $origin_missing
   let pulled = (run-command git ["-C" ($root | into string) "pull" "--ff-only" "origin" "main"] --allow-failure --quiet --capture)
   if $pulled.exit_code != 0 {
     if ($pulled.stderr | str contains "fast-forward") {

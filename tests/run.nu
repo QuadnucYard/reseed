@@ -781,6 +781,56 @@ def test-git-sync [] {
     ".reseed-state\n" | save ($no_repo | path join ".reseed-state")
     git-sync $no_repo ($origin | into string)
     assert (($no_repo | path join ".reseed-state") | path exists) "non-repository sync is skipped"
+
+    # A source that is not a Git repository fails early and does not pollute
+    # the local origin remote.
+    let fresh = ($sandbox | path join "fresh")
+    run-command git ["init" "-b" "main" ($fresh | into string)] --quiet | ignore
+    configure-git-identity $fresh
+    "local\n" | save ($fresh | path join "mise.toml")
+    run-command git ["-C" ($fresh | into string) "add" "--all"] --quiet | ignore
+    run-command git ["-C" ($fresh | into string) "commit" "-m" "local"] --quiet | ignore
+    let not_a_repo = ($sandbox | path join "not-a-repo")
+    mkdir $not_a_repo
+    let rejected = (try {
+      git-sync $fresh ($not_a_repo | into string)
+      ""
+    } catch {|error| $error.msg? | default ($error | to nuon) })
+    assert (($rejected | str contains "Cannot read the private state repository")) "non-git source is rejected"
+    let origin_probe = (run-command git ["-C" ($fresh | into string) "remote" "get-url" "origin"] --allow-failure --quiet --capture)
+    assert ne $origin_probe.exit_code 0 "failed sync leaves origin unset"
+
+    # A readable Git source without a main branch is rejected before syncing.
+    let master_seed = ($sandbox | path join "master-seed")
+    run-command git ["init" "-b" "master" ($master_seed | into string)] --quiet | ignore
+    configure-git-identity $master_seed
+    "x\n" | save ($master_seed | path join "x.txt")
+    run-command git ["-C" ($master_seed | into string) "add" "--all"] --quiet | ignore
+    run-command git ["-C" ($master_seed | into string) "commit" "-m" "master seed"] --quiet | ignore
+    let master_origin = ($sandbox | path join "master.git")
+    run-command git ["init" "--bare" ($master_origin | into string)] --quiet | ignore
+    run-command git ["-C" ($master_seed | into string) "remote" "add" "origin" ($master_origin | into string)] --quiet | ignore
+    run-command git ["-C" ($master_seed | into string) "push" "origin" "master"] --quiet | ignore
+    let no_main = (try {
+      git-sync $fresh ($master_origin | into string)
+      ""
+    } catch {|error| $error.msg? | default ($error | to nuon) })
+    assert (($no_main | str contains "no main branch")) "source without a main branch is rejected"
+
+    # A template-seeded root (unborn branch, no commits) adopts the provided
+    # repository wholesale, preserving non-colliding untracked files.
+    let seeded = ($sandbox | path join "seeded")
+    run-command git ["init" "-b" "main" ($seeded | into string)] --quiet | ignore
+    mkdir ($seeded | path join "config")
+    ".reseed-state\n" | save ($seeded | path join ".reseed-state")
+    "{ schema: 1 }\n" | save ($seeded | path join "config" "recovery.nuon")
+    "user note\n" | save ($seeded | path join "user-note.txt")
+    assert (not (($seeded | path join "mise.toml") | path exists)) "fixture seed starts without mise.toml"
+    git-sync $seeded ($origin | into string)
+    assert ((open --raw ($seeded | path join "mise.toml")) | str contains "rival edit") "unborn seed adopts the latest provided state"
+    assert (($seeded | path join "user-note.txt") | path exists) "unborn seed adoption keeps non-colliding files"
+    let seeded_head = (run-command git ["-C" ($seeded | into string) "log" "-1" "--format=%s"] --quiet --capture)
+    assert eq ($seeded_head.stdout | str trim) "rival edit" "unborn seed adoption lands on the remote commit"
   }
 }
 
