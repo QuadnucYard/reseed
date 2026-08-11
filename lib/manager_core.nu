@@ -142,7 +142,11 @@ export def manager-verify [
     {
       check: $"($manager) executable"
       ok: ($installed.available? | default false)
-      detail: $"required for configured ($manager) ($unit)s"
+      detail: (if ($installed.available? | default false) {
+        $"required for configured ($manager) ($unit)s"
+      } else {
+        $"($manager) is unavailable: ($installed.detail? | default 'the inventory command failed')"
+      })
     }
     {
       check: $"($manager) ($unit)s"

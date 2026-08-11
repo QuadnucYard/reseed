@@ -181,7 +181,9 @@ export def workflow-status [
   warn-bootstrap-outdated $outdated
 }
 
-# Fail when the configuration has any validation error-level issue.
+# Fail when the configuration has any validation error-level issue. Advisory
+# warning-level issues are printed so restore/update surface them before the
+# final verification would fail opaquely.
 def check-config [
   root: path # Private state root.
   config: record # Loaded configuration.
@@ -191,6 +193,11 @@ def check-config [
   if ($errors | is-not-empty) {
     $errors | table | print --stderr
     fail "Configuration validation failed"
+  }
+  let warnings = ($issues | where level == warning)
+  if ($warnings | is-not-empty) {
+    warning "Configuration warnings; resolve them for a reproducible restore:"
+    $warnings | table | print
   }
 }
 

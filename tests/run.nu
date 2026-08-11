@@ -144,7 +144,9 @@ def test-cargo-binstall [
     manifests: [packages/cargo/binstall.nuon]
     update: true
   })
-  assert ((validate-config $state_root $cargo_config) | is-empty) "cargo-binstall config validates"
+  let cargo_issues = (validate-config $state_root $cargo_config)
+  assert (($cargo_issues | where level == error) | is-empty) "cargo-binstall config validates without errors"
+  assert ($cargo_issues | any {|issue| $issue.level == warning and $issue.area == cargo_binstall and ($issue.message | str contains "aqua:cargo-bins/cargo-binstall") }) "enabling cargo-binstall without its mise tool warns with the [tools] entry to add"
   let cargo_fixture_config = ($config | upsert software.mise.cargo_binstall {
     enabled: true
     manifests: [tests/fixtures/cargo-binstall.nuon]
@@ -630,6 +632,13 @@ def test-mise-config-validation [
   assert ($invalid_issues | any {|issue| $issue.area == mise and ($issue.message | str contains "Unsupported config name") }) "mise config names are validated"
   let missing_task = ($config | upsert software.mise.task_files [scripts/missing.nu])
   assert ((validate-config $state_root $missing_task) | any {|issue| $issue.area == mise and ($issue.message | str contains "Missing mise task file") }) "mise task files are validated"
+  # An enabled manager whose tool is missing from the manager mise config warns
+  # with the exact [tools] entry to add; declared managers stay quiet.
+  let undeclared_bun = ($config | upsert software.mise.bun {enabled: true manifests: [packages/node/bun/global.nuon] update: true})
+  let bun_issues = (validate-config $state_root $undeclared_bun)
+  assert (($bun_issues | where level == error) | is-empty) "enabling an undeclared manager validates without errors"
+  assert ($bun_issues | any {|issue| $issue.level == warning and $issue.area == bun and ($issue.message | str contains "aqua:oven-sh/bun") }) "enabling an undeclared manager warns with the aqua tool to declare"
+  assert ((validate-config $state_root $config | where level == warning) | is-empty) "declared managers produce no warnings"
 }
 
 # Checkpoint scoping and desired-state fingerprints.

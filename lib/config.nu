@@ -250,6 +250,36 @@ def validate-winget-manifest [
   $issues
 }
 
+# Names of the tools declared in a mise config [tools] table, with any
+# backend-qualified prefix (e.g. "aqua:pnpm/pnpm") reduced to the bare tool
+# name ("pnpm"). Returns an empty list when the file is missing or unparsable.
+def mise-config-tool-names [
+  path: path # Mise config file.
+]: nothing -> list<string> {
+  if not ($path | path exists) { return [] }
+  let manifest = (try { open $path } catch { return [] })
+  let tools = ($manifest.tools? | default {})
+  if not (($tools | describe) | str starts-with "record") { return [] }
+  $tools | columns | each {|key|
+    let name = (if ($key | str contains ":") {
+      $key | str substring (($key | str index-of ":") + 1)..
+    } else { $key })
+    $name | split row "/" | last
+  }
+}
+
+# The mise tool every enabled manager integration expects so its commands run
+# through "mise exec -- <tool>"; the aqua key is the recommended declaration.
+def manager-bootstrap-tools []: nothing -> list<record> {
+  [
+    {manager: cargo_binstall tool: "cargo-binstall" aqua: "aqua:cargo-bins/cargo-binstall"}
+    {manager: uv tool: "uv" aqua: "aqua:astral-sh/uv"}
+    {manager: pnpm tool: "pnpm" aqua: "aqua:pnpm/pnpm"}
+    {manager: yarn tool: "yarn" aqua: "aqua:yarnpkg/yarn"}
+    {manager: bun tool: "bun" aqua: "aqua:oven-sh/bun"}
+  ]
+}
+
 # Validate the mise settings: manager config selection, backend dependencies,
 # task files, and the nested cargo-binstall, uv, and Node manager sections.
 def validate-mise [
@@ -288,6 +318,28 @@ def validate-mise [
           level: error
           area: mise
           message: $"Mise backend '($dependency.backend)' in ($relative) requires '($dependency.tool)' in the same [tools] table; add ($dependency.tool) = \"latest\" or remove the backend-qualified entry"
+        })
+      }
+    }
+  }
+  # Manager operations run "mise exec -- <tool>" through the manager config, so
+  # an enabled manager needs its tool declared there to be reproducible. The
+  # engine still falls back to the ambient PATH, so this is advisory: a warning
+  # points at the exact [tools] entry before verification fails opaquely.
+  let manager_config_path = if (($manager_config | describe) == "string") and (not ($manager_config | str trim | is-empty)) {
+    $root | path join $manager_config
+  } else {
+    null
+  }
+  if $manager_config_path != null and ($manager_config_path | path exists) {
+    let declared_tools = (mise-config-tool-names $manager_config_path)
+    for tool in (manager-bootstrap-tools) {
+      let enabled = (($settings | get -o $tool.manager | default {}).enabled? | default false)
+      if $enabled and ($tool.tool not-in $declared_tools) {
+        $issues = ($issues | append {
+          level: warning
+          area: $tool.manager
+          message: $"software.mise.($tool.manager) is enabled but ($tool.tool) is not declared in ($manager_config); add ($tool.aqua) = \"latest\" to [tools] so 'mise exec -- ($tool.tool)' can run it"
         })
       }
     }
