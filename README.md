@@ -28,7 +28,9 @@ generator repairs itself.
 # Initialize local private state. This is safe to run again.
 nu reseed.nu init
 
-# Attach a private remote you created on your Git host.
+# Attach a private remote you created on your Git host. On an existing state
+# root this also adopts the remote state (pulling recovery.nuon, profiles, and
+# manifests into the local scaffold) when it is safe to do so.
 nu reseed.nu init --remote-url <private-state-git-url>
 
 # Capture, commit, and push the private state.
@@ -36,7 +38,10 @@ nu reseed.nu backup --commit --push
 ```
 
 The engine never chooses a hosting provider or remote URL. It also refuses to
-replace an existing `origin` with a different URL.
+replace an existing `origin` with a different URL. A state root that has local
+commits or uncommitted changes is left untouched by `init --remote-url`; use
+`reseed adopt --remote-url <url> --replace` to explicitly discard local work in
+favor of the remote state.
 
 The private repository contains all desired workstation state:
 
@@ -163,6 +168,25 @@ SSH, a credential manager, or an interactive Git helper. When the state root is
 already initialized, the bootstrap fast-forwards it from the provided
 repository first, so a stale local copy (for example one missing a recently
 added `config/recovery.nuon`) repairs itself before restore runs.
+
+### No repository yet? Bootstrap first, link later
+
+When the private repository cannot be used yet (no SSH key, no `gh` auth, no
+network to the host), run the bootstrap without `--state-repository`. It seeds
+the generic template into the state root, restores the machine from it, and
+leaves the state root uncommitted so it can be linked later. Once network
+access is configured, connect it to the private repository:
+
+```sh
+nu reseed.nu adopt --remote-url <private-state-git-url>
+```
+
+`reseed adopt` pulls the real private state (including `config/recovery.nuon`)
+into the existing root without re-running the whole bootstrap. It adopts a
+template seed directly and refuses to overwrite local commits or uncommitted
+changes unless you pass `--replace`. The bootstraps' `--state-repository` flag
+is the equivalent one-step path when the repository is available at bootstrap
+time.
 
 When the network cannot reach GitHub (common in China), Homebrew bootstrap
 accepts `--homebrew-mirror ustc|tuna` to route the installer and package

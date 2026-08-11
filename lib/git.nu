@@ -102,25 +102,49 @@ def configure-origin [
   }
 }
 
+# Fetch the provided state and reset the working tree to it, replacing files
+# the repository owns while keeping non-colliding untracked files.
+def adopt-origin [
+  root: path # Private state root.
+] {
+  run-command git ["-C" ($root | into string) "fetch" "origin" "main"] | ignore
+  run-command git ["-C" ($root | into string) "reset" "--hard" "origin/main"] | ignore
+}
+
 # Fast-forward the already-initialized private state from the provided
 # repository, so the platform bootstraps restore from the supplied source even
 # when the state root was seeded or cloned earlier. Refuses to sync a local
 # clone whose origin points at a different repository, validates that the
 # provided source is a readable Git repository with a main branch before
 # configuring it (so a bad source never pollutes origin), and leaves a dirty or
-# diverged working tree untouched so recovery is never blocked by local changes.
-# A template-seeded root that has never been committed (unborn branch) adopts
-# the provided state wholesale, replacing its colliding scaffold files while
-# keeping any non-colliding untracked files.
+# diverged working tree untouched unless --replace explicitly discards local
+# work. A state root that is not yet a repository (or a template seed on an
+# unborn branch) adopts the provided state wholesale, replacing its colliding
+# files while keeping any non-colliding untracked files. Returns a record
+# reporting whether the state was adopted or synced and, when skipped, why.
 export def git-sync [
   root: path # Private state root.
   repository: string # Private state repository URL.
-]: nothing -> nothing {
+  --replace # Discard local commits and uncommitted changes in favor of the provided state.
+]: nothing -> record {
   if not (command-exists git) { fail "Git is required to sync the private state" }
   let probe = (run-command git ["-C" ($root | into string) "rev-parse" "--is-inside-work-tree"] --allow-failure --quiet --capture)
   if $probe.exit_code != 0 {
+    # The bootstrap only syncs a root that already carries the sentinel. When
+    # that root was never initialized as a repository, initialize it and adopt
+    # the provided state so its files are copied in and the root becomes
+    # git-managed. git init touches no files; reset --hard replaces only files
+    # the provided repository owns and keeps non-colliding untracked files.
+    if (($root | path join ".reseed-state") | path exists) {
+      validate-source $repository
+      run-command git ["-C" ($root | into string) "init" "-b" "main"] | ignore
+      run-command git ["-C" ($root | into string) "remote" "add" "origin" $repository] --quiet | ignore
+      adopt-origin $root
+      info $"Initialized and adopted the provided private state: (scrub-url $repository)"
+      return {synced: true status: "adopted"}
+    }
     warning "Private state is not a Git repository; leaving it unchanged"
-    return
+    return {synced: false status: "no-repo"}
   }
   let existing = (run-command git ["-C" ($root | into string) "remote" "get-url" "origin"] --allow-failure --quiet --capture)
   let origin_missing = ($existing.exit_code != 0)
@@ -134,29 +158,41 @@ export def git-sync [
   if $unborn.exit_code != 0 {
     validate-source $repository
     configure-origin $root $repository $origin_missing
-    run-command git ["-C" ($root | into string) "fetch" "origin" "main"] | ignore
-    run-command git ["-C" ($root | into string) "reset" "--hard" "origin/main"] | ignore
+    adopt-origin $root
     info $"Adopted the provided private state over the uncommitted local seed: (scrub-url $repository)"
-    return
+    return {synced: true status: "adopted"}
   }
   let dirty = (run-command git ["-C" ($root | into string) "status" "--porcelain"] --quiet --capture)
   if not ($dirty.stdout | str trim | is-empty) {
+    if $replace {
+      validate-source $repository
+      configure-origin $root $repository $origin_missing
+      adopt-origin $root
+      warning "Discarded local private-state changes in favor of the provided state"
+      return {synced: true status: "replaced"}
+    }
     warning "Private state has local changes; leaving it unchanged"
-    return
+    return {synced: false status: "dirty"}
   }
   validate-source $repository
   configure-origin $root $repository $origin_missing
   let pulled = (run-command git ["-C" ($root | into string) "pull" "--ff-only" "origin" "main"] --allow-failure --quiet --capture)
   if $pulled.exit_code != 0 {
     if ($pulled.stderr | str contains "fast-forward") {
+      if $replace {
+        adopt-origin $root
+        warning "Discarded local private-state commits in favor of the provided state"
+        return {synced: true status: "replaced"}
+      }
       warning "Private state has diverged from origin; leaving it unchanged"
-      return
+      return {synced: false status: "diverged"}
     }
     let detail = (if ($pulled.stderr | str trim | is-empty) { $pulled.stdout } else { $pulled.stderr })
     let detail = (scrub-url ($detail | str trim))
     fail $"Could not sync the private state from (scrub-url $repository): ($detail)"
   }
   info $"Synchronized private state from (scrub-url $repository)"
+  {synced: true status: "synced"}
 }
 
 # Fast-forward pull the private state from its configured remote, refusing to

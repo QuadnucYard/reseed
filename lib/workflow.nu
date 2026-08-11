@@ -5,7 +5,7 @@
 use core.nu [confirm detect-os fail info warning]
 use config.nu [config-fingerprint load-config validate-config]
 use state.nu [complete-stage fail-stage load-checkpoint stage-done]
-use git.nu [git-bundle git-commit git-init git-pull git-status]
+use git.nu [git-bundle git-commit git-init git-pull git-status git-sync]
 use secrets.nu [commit-change-summary scan-commit-secrets]
 use ../integrations/chezmoi.nu [chezmoi-backup chezmoi-restore chezmoi-status chezmoi-verify]
 use ../integrations/bootstrap.nu [bootstrap-outdated bootstrap-status bootstrap-verify]
@@ -117,6 +117,17 @@ export def workflow-init [
   let config = (load-config $config_root $profiles)
   check-config $config_root $config
   git-init $state_root $config --remote-url=$remote_url --dry-run=$dry_run
+  if not $dry_run and ($remote_url != null) and not ($remote_url | str trim | is-empty) {
+    # Attaching a remote to an existing root now adopts its state when safe, so
+    # the documented "attach a private remote" flow actually pulls the private
+    # state in instead of leaving the local scaffold in place. A dirty or
+    # diverged root is left alone (warning) so recovery is never blocked; use
+    # "reseed adopt" for an explicit, replace-capable link.
+    let adopted = (git-sync $state_root $remote_url)
+    if not $adopted.synced {
+      warning $"Attached the remote but left the local state unchanged: ($adopted.status). Run 'reseed adopt --remote-url ... --replace' to replace it."
+    }
+  }
   info $"Private Reseed state: ($state_root)"
 }
 

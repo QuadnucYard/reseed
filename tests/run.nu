@@ -3,7 +3,7 @@ use ./helpers.nu *
 use ../lib/config.nu [config-fingerprint deep-merge load-config parse-profiles validate-config]
 use ../lib/git.nu [git-sync]
 use ../lib/prelude.nu *
-use ../lib/workflow.nu [sync-engine-files workflow-plan workflow-verification-tools]
+use ../lib/workflow.nu [sync-engine-files workflow-init workflow-plan workflow-verification-tools]
 use ../lib/secrets.nu [commit-change-summary scan-commit-secrets secret-content-matches secret-name-matches]
 use ../integrations/bootstrap.nu [bootstrap-brew-items bootstrap-outdated bootstrap-tools bootstrap-winget-ids parse-brew-outdated parse-winget-upgrade-table]
 use ../integrations/homebrew.nu [brewfile-items brewfile-summary homebrew-env homebrew-mirror-label homebrew-persist-env homebrew-shell-snippets native-brewfile-items parse-outdated-names]
@@ -767,6 +767,11 @@ def test-git-sync [] {
     let head = (run-command git ["-C" ($stale | into string) "log" "-1" "--format=%s"] --quiet --capture)
     assert eq ($head.stdout | str trim) "local divergence" "diverged sync keeps the local commit"
 
+    # --replace adopts the remote over a committed, diverged local branch.
+    git-sync $stale ($origin | into string) --replace
+    let replaced_head = (run-command git ["-C" ($stale | into string) "log" "-1" "--format=%s"] --quiet --capture)
+    assert eq ($replaced_head.stdout | str trim) "rival edit" "--replace adopts the remote over local commits"
+
     # A mismatched origin is refused instead of syncing from a different repo.
     run-command git ["-C" ($stale | into string) "remote" "set-url" "origin" "https://example.com/other.git"] --quiet | ignore
     let refused = (try {
@@ -831,6 +836,39 @@ def test-git-sync [] {
     assert (($seeded | path join "user-note.txt") | path exists) "unborn seed adoption keeps non-colliding files"
     let seeded_head = (run-command git ["-C" ($seeded | into string) "log" "-1" "--format=%s"] --quiet --capture)
     assert eq ($seeded_head.stdout | str trim) "rival edit" "unborn seed adoption lands on the remote commit"
+
+    # --replace discards uncommitted changes in favor of the provided state.
+    "local replace\n" | save --append ($seeded | path join "mise.toml")
+    git-sync $seeded ($origin | into string) --replace
+    assert (not ((open --raw ($seeded | path join "mise.toml")) | str contains "local replace")) "--replace discards uncommitted changes"
+  }
+}
+
+# init --remote-url adopts the remote state onto a fresh seed, so attaching a
+# private remote actually pulls the private state in instead of leaving the
+# template scaffold in place.
+def test-init-adopt [
+  engine_root: path # Engine root providing the template.
+] {
+  if not (command-exists git) { return }
+  with-temp-dir "reseed-init-adopt.XXXXXXXX" {|sandbox|
+    let origin = ($sandbox | path join "origin.git")
+    run-command git ["init" "--bare" "-b" "main" ($origin | into string)] --quiet | ignore
+    let seed = ($sandbox | path join "seed")
+    mkdir $seed
+    for entry in (ls --all ($engine_root | path join "templates" "state")) {
+      cp --recursive $entry.name $seed
+    }
+    run-command git ["-C" ($seed | into string) "init" "-b" "main"] --quiet | ignore
+    configure-git-identity $seed
+    run-command git ["-C" ($seed | into string) "add" "--all"] --quiet | ignore
+    run-command git ["-C" ($seed | into string) "commit" "-m" "adopted state"] --quiet | ignore
+    run-command git ["-C" ($seed | into string) "remote" "add" "origin" ($origin | into string)] --quiet | ignore
+    run-command git ["-C" ($seed | into string) "push" "-u" "origin" "main"] --quiet | ignore
+    let state_root = ($sandbox | path join "state")
+    workflow-init $engine_root $state_root [] --remote-url ($origin | into string)
+    let head = (run-command git ["-C" ($state_root | into string) "log" "-1" "--format=%s"] --quiet --capture)
+    assert eq ($head.stdout | str trim) "adopted state" "init --remote-url adopts the remote state onto a fresh seed"
   }
 }
 
@@ -862,6 +900,7 @@ def main [] {
   test-sync-engine-files $engine_root $state_root
   test-shell-generator-preflight $engine_root $state_root
   test-git-sync
+  test-init-adopt $engine_root
 
   print "All Reseed tests passed"
 }

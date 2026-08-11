@@ -1,7 +1,7 @@
 #!/usr/bin/env nu
 
 use lib/config.nu [load-config parse-profiles]
-use lib/core.nu [expand-home]
+use lib/core.nu [expand-home scrub-url]
 use lib/git.nu [git-sync]
 use lib/setup.nu [setup-wizard]
 use lib/workflow.nu [workflow-backup workflow-bundle workflow-init workflow-plan workflow-reconcile workflow-restore workflow-status workflow-update workflow-verify]
@@ -51,7 +51,34 @@ def "main sync-state" [
     fail "sync-state requires --repository"
   }
   let state = (resolved-state-root $state_root)
-  git-sync $state $repository
+  git-sync $state $repository | ignore
+}
+
+# Link the local private state to the remote repository and adopt its state,
+# for a machine bootstrapped without a repository once network access is
+# configured. Adopts template seeds and empty roots directly, and refuses to
+# overwrite local commits or uncommitted changes unless --replace is given.
+def "main adopt" [
+  --profiles (-p): string = "" # Comma-separated profiles; defaults to those configured in recovery.nuon.
+  --state-root (-s): string = "" # Private state directory; overrides RESEED_STATE_ROOT and ~/.local/share/reseed.
+  --remote-url: string # Private state repository URL to adopt.
+  --replace # Discard local commits and uncommitted changes in favor of the provided state.
+] {
+  if ($remote_url | str trim | is-empty) {
+    fail "adopt requires --remote-url"
+  }
+  let state = (resolved-state-root $state_root)
+  let result = (git-sync $state $remote_url --replace=$replace)
+  if not $result.synced {
+    let guidance = match $result.status {
+      dirty => "the local state has uncommitted changes; commit or stash them, or rerun with --replace to discard them"
+      diverged => "the local state has diverged from the provided repository; push local commits or rerun with --replace to adopt the remote state"
+      no-repo => "the state root is not initialized; run 'reseed init --remote-url ...' to seed and adopt it"
+      _ => $"the local state could not be adopted: ($result.status)"
+    }
+    fail $"Could not adopt the private state from (scrub-url $remote_url): ($guidance)"
+  }
+  workflow-init (engine-root) $state (parse-profiles $profiles) --remote-url=$remote_url
 }
 
 # Create or validate a private state repository and initialize it with Git.
