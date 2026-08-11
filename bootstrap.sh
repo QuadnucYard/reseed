@@ -317,13 +317,28 @@ resolve_state_root() {
   fi
 }
 
+# Fast-forward the already-initialized private state from the provided
+# repository, so recovery always restores from the supplied source. The sync
+# logic lives in "nu sync-state": it refuses mismatched remotes, leaves a
+# dirty or diverged working tree alone, and fails when the repository cannot
+# be reached.
+sync_state_repository() {
+  printf '%s\n' "reseed: syncing private state: $(scrub_url "$state_repository")"
+  nu "$entrypoint" sync-state --state-root "$state_root" --repository "$state_repository"
+}
+
 # Clone the private state repository when the state root is uninitialized.
 # Refuses a nonempty directory without the .reseed-state sentinel, reads the
 # remote before cloning so a wrong URL fails early, and only clones when the
-# remote has a main branch.
+# remote has a main branch. An already-initialized root is instead synced from
+# the provided repository so a stale local copy repairs itself.
 ensure_state_repository() {
   sentinel=$state_root/.reseed-state
-  if [ -z "$state_repository" ] || [ -f "$sentinel" ]; then
+  if [ -z "$state_repository" ]; then
+    return
+  fi
+  if [ -f "$sentinel" ]; then
+    sync_state_repository
     return
   fi
   if [ -d "$state_root" ] && [ -n "$(ls -A "$state_root")" ]; then

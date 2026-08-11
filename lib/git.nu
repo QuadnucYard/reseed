@@ -77,6 +77,49 @@ export def git-init [
   info $"Reseed source repository: ($root)"
 }
 
+# Fast-forward the already-initialized private state from the provided
+# repository, so the platform bootstraps restore from the supplied source even
+# when the state root was seeded or cloned earlier. Refuses to sync a local
+# clone whose origin points at a different repository, configures origin when
+# the state was seeded without a remote, and leaves a dirty or diverged working
+# tree untouched so recovery is never blocked by local changes.
+export def git-sync [
+  root: path # Private state root.
+  repository: string # Private state repository URL.
+]: nothing -> nothing {
+  if not (command-exists git) { fail "Git is required to sync the private state" }
+  let probe = (run-command git ["-C" ($root | into string) "rev-parse" "--is-inside-work-tree"] --allow-failure --quiet --capture)
+  if $probe.exit_code != 0 {
+    warning "Private state is not a Git repository; leaving it unchanged"
+    return
+  }
+  let existing = (run-command git ["-C" ($root | into string) "remote" "get-url" "origin"] --allow-failure --quiet --capture)
+  if $existing.exit_code == 0 {
+    let current = ($existing.stdout | str trim)
+    if $current != $repository {
+      fail $"Git remote 'origin' already points to (scrub-url $current); refusing to sync from (scrub-url $repository)"
+    }
+  } else {
+    run-command git ["-C" ($root | into string) "remote" "add" "origin" $repository] --quiet | ignore
+  }
+  let dirty = (run-command git ["-C" ($root | into string) "status" "--porcelain"] --quiet --capture)
+  if not ($dirty.stdout | str trim | is-empty) {
+    warning "Private state has local changes; leaving it unchanged"
+    return
+  }
+  let pulled = (run-command git ["-C" ($root | into string) "pull" "--ff-only" "origin" "main"] --allow-failure --quiet --capture)
+  if $pulled.exit_code != 0 {
+    if ($pulled.stderr | str contains "fast-forward") {
+      warning "Private state has diverged from origin; leaving it unchanged"
+      return
+    }
+    let detail = (if ($pulled.stderr | str trim | is-empty) { $pulled.stdout } else { $pulled.stderr })
+    let detail = (scrub-url ($detail | str trim))
+    fail $"Could not sync the private state from (scrub-url $repository): ($detail)"
+  }
+  info $"Synchronized private state from (scrub-url $repository)"
+}
+
 # Fast-forward pull the private state from its configured remote, refusing to
 # proceed when the working tree has local changes.
 export def git-pull [

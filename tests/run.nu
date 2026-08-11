@@ -1,6 +1,7 @@
 use std assert
 use ./helpers.nu *
 use ../lib/config.nu [config-fingerprint deep-merge load-config parse-profiles validate-config]
+use ../lib/git.nu [git-sync]
 use ../lib/prelude.nu *
 use ../lib/workflow.nu [sync-engine-files workflow-plan workflow-verification-tools]
 use ../lib/secrets.nu [commit-change-summary scan-commit-secrets secret-content-matches secret-name-matches]
@@ -24,6 +25,13 @@ def with-temp-dir [template: string body: closure] {
     rm --recursive --force $sandbox
     error make $err
   }
+}
+
+# Set a local Git identity on a disposable repository so commits work on CI
+# runners that have no user.name/user.email configured globally.
+def configure-git-identity [repo: path] {
+  run-command git ["-C" ($repo | into string) "config" "user.email" "reseed@example.com"] --quiet | ignore
+  run-command git ["-C" ($repo | into string) "config" "user.name" "Reseed Test"] --quiet | ignore
 }
 
 # Configuration loading: deep merge, profile parsing, command display and
@@ -706,6 +714,76 @@ def test-secret-guard [
   }
 }
 
+# Bootstrap state sync: fast-forward an already-initialized private state root
+# from the provided repository, leaving dirty, diverged, and non-repository
+# roots alone and refusing a mismatched remote.
+def test-git-sync [] {
+  if not (command-exists git) { return }
+  with-temp-dir "reseed-sync-test.XXXXXXXX" {|sandbox|
+    let origin = ($sandbox | path join "origin.git")
+    let seed = ($sandbox | path join "seed")
+    run-command git ["init" "--bare" "-b" "main" ($origin | into string)] --quiet | ignore
+    run-command git ["init" "-b" "main" ($seed | into string)] --quiet | ignore
+    configure-git-identity $seed
+    "scaffold\n" | save ($seed | path join "mise.toml")
+    run-command git ["-C" ($seed | into string) "add" "--all"] --quiet | ignore
+    run-command git ["-C" ($seed | into string) "commit" "-m" "seed"] --quiet | ignore
+    run-command git ["-C" ($seed | into string) "remote" "add" "origin" ($origin | into string)] --quiet | ignore
+    run-command git ["-C" ($seed | into string) "push" "-u" "origin" "main"] --quiet | ignore
+
+    # A stale clone repairs itself once origin gains the missing desired state.
+    let stale = ($sandbox | path join "stale")
+    run-command git ["clone" "--branch" "main" "--single-branch" ($origin | into string) ($stale | into string)] --quiet | ignore
+    configure-git-identity $stale
+    assert (not (($stale | path join "config" "recovery.nuon") | path exists)) "fixture clone starts without recovery.nuon"
+    mkdir ($seed | path join "config")
+    "{\n  schema: 1\n}\n" | save ($seed | path join "config" "recovery.nuon")
+    run-command git ["-C" ($seed | into string) "add" "--all"] --quiet | ignore
+    run-command git ["-C" ($seed | into string) "commit" "-m" "add config"] --quiet | ignore
+    run-command git ["-C" ($seed | into string) "push" "origin" "main"] --quiet | ignore
+    git-sync $stale ($origin | into string)
+    assert (($stale | path join "config" "recovery.nuon") | path exists) "sync fast-forwards the provided state"
+
+    # Up-to-date syncs are a no-op.
+    git-sync $stale ($origin | into string)
+    assert (($stale | path join "config" "recovery.nuon") | path exists) "up-to-date sync keeps the state"
+
+    # A dirty working tree is left untouched and the sync still succeeds.
+    "local edit\n" | save --append ($stale | path join "mise.toml")
+    git-sync $stale ($origin | into string)
+    assert (open --raw ($stale | path join "mise.toml") | str contains "local edit") "dirty sync leaves local changes alone"
+
+    # A diverged working tree warns and keeps the local commit.
+    run-command git ["-C" ($stale | into string) "add" "--all"] --quiet | ignore
+    run-command git ["-C" ($stale | into string) "commit" "-m" "local divergence"] --quiet | ignore
+    let rival = ($sandbox | path join "rival")
+    run-command git ["clone" "--branch" "main" "--single-branch" ($origin | into string) ($rival | into string)] --quiet | ignore
+    configure-git-identity $rival
+    "rival edit\n" | save --append ($rival | path join "mise.toml")
+    run-command git ["-C" ($rival | into string) "add" "--all"] --quiet | ignore
+    run-command git ["-C" ($rival | into string) "commit" "-m" "rival edit"] --quiet | ignore
+    run-command git ["-C" ($rival | into string) "push" "origin" "main"] --quiet | ignore
+    git-sync $stale ($origin | into string)
+    let head = (run-command git ["-C" ($stale | into string) "log" "-1" "--format=%s"] --quiet --capture)
+    assert eq ($head.stdout | str trim) "local divergence" "diverged sync keeps the local commit"
+
+    # A mismatched origin is refused instead of syncing from a different repo.
+    run-command git ["-C" ($stale | into string) "remote" "set-url" "origin" "https://example.com/other.git"] --quiet | ignore
+    let refused = (try {
+      git-sync $stale ($origin | into string)
+      ""
+    } catch {|error| $error.msg? | default ($error | to nuon) })
+    assert (($refused | str contains "refusing to sync")) "mismatched origin is refused"
+
+    # A sentinel-marked root without a Git repository is skipped, not failed.
+    let no_repo = ($sandbox | path join "no-repo")
+    mkdir $no_repo
+    ".reseed-state\n" | save ($no_repo | path join ".reseed-state")
+    git-sync $no_repo ($origin | into string)
+    assert (($no_repo | path join ".reseed-state") | path exists) "non-repository sync is skipped"
+  }
+}
+
 def main [] {
   let engine_root = ($env.FILE_PWD | path dirname)
   let state_root = ($engine_root | path join "templates" "state")
@@ -733,6 +811,7 @@ def main [] {
   test-checkpoints $engine_root $state_root
   test-sync-engine-files $engine_root $state_root
   test-shell-generator-preflight $engine_root $state_root
+  test-git-sync
 
   print "All Reseed tests passed"
 }

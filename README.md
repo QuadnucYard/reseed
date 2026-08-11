@@ -159,7 +159,10 @@ macOS:
 
 The older `-Repository`/`--repository` spelling remains an alias for the private
 state repository. Credentials for cloning must already be available through
-SSH, a credential manager, or an interactive Git helper.
+SSH, a credential manager, or an interactive Git helper. When the state root is
+already initialized, the bootstrap fast-forwards it from the provided
+repository first, so a stale local copy (for example one missing a recently
+added `config/recovery.nuon`) repairs itself before restore runs.
 
 When the network cannot reach GitHub (common in China), Homebrew bootstrap
 accepts `--homebrew-mirror ustc|tuna` to route the installer and package

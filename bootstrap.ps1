@@ -13,7 +13,9 @@
     app without a CLI self-update, so only the contract tools are checked.
 
 .PARAMETER StateRepository
-    Private state repository URL; cloned when the state root is uninitialized.
+    Private state repository URL; cloned when the state root is uninitialized,
+    and used to refresh (fast-forward) an already-initialized state root before
+    restore.
 
 .PARAMETER StateRoot
     Private state root; defaults to RESEED_STATE_ROOT or ~\.local\share\reseed.
@@ -388,19 +390,44 @@ function Resolve-StateRoot {
 
 <#
 .SYNOPSIS
+    Fast-forward the already-initialized private state from the provided
+    repository, so recovery always restores from the supplied source. The sync
+    logic lives in "nu sync-state": it refuses mismatched remotes, leaves a
+    dirty or diverged working tree alone, and fails when the repository cannot
+    be reached.
+#>
+function Sync-StateRepository {
+    param(
+        [string]$Entrypoint,
+        [string]$Root,
+        [string]$Repository
+    )
+    Write-Step "syncing private state: $(Format-RedactedUrl $Repository)"
+    & nu.exe $Entrypoint sync-state --state-root $Root --repository $Repository
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to sync private state (exit $LASTEXITCODE)."
+    }
+}
+
+<#
+.SYNOPSIS
     Clone the private state repository when the state root is uninitialized.
 .DESCRIPTION
     Refuses a nonempty directory without the .reseed-state sentinel, reads the
     remote before cloning so a wrong URL fails early, and only clones when the
-    remote has a main branch.
+    remote has a main branch. An already-initialized root is instead synced
+    from the provided repository so a stale local copy repairs itself.
 #>
 function Initialize-StateRepository {
     param(
+        [string]$Entrypoint,
         [string]$Root,
         [string]$Repository
     )
+    if ([string]::IsNullOrWhiteSpace($Repository)) { return }
     $sentinel = Join-Path $Root ".reseed-state"
-    if ([string]::IsNullOrWhiteSpace($Repository) -or (Test-Path -LiteralPath $sentinel -PathType Leaf)) {
+    if (Test-Path -LiteralPath $sentinel -PathType Leaf) {
+        Sync-StateRepository -Entrypoint $Entrypoint -Root $Root -Repository $Repository
         return
     }
     if (Test-Path -LiteralPath $Root) {
@@ -478,6 +505,6 @@ Add-PortableToolsPath
 Ensure-BootstrapTools
 $engineRoot = Assert-EngineRoot
 $resolvedRoot = Resolve-StateRoot
-Initialize-StateRepository -Root $resolvedRoot -Repository $StateRepository
+Initialize-StateRepository -Entrypoint (Join-Path $engineRoot "reseed.nu") -Root $resolvedRoot -Repository $StateRepository
 Initialize-PrivateState -Entrypoint (Join-Path $engineRoot "reseed.nu") -Root $resolvedRoot -Repository $StateRepository
 Invoke-Restore -Entrypoint (Join-Path $engineRoot "reseed.nu") -Root $resolvedRoot

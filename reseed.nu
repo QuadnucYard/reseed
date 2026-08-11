@@ -2,6 +2,7 @@
 
 use lib/config.nu [load-config parse-profiles]
 use lib/core.nu [expand-home]
+use lib/git.nu [git-sync]
 use lib/setup.nu [setup-wizard]
 use lib/workflow.nu [workflow-backup workflow-bundle workflow-init workflow-plan workflow-reconcile workflow-restore workflow-status workflow-update workflow-verify]
 use integrations/finder.nu [finder-restore finder-status finder-verify]
@@ -37,6 +38,20 @@ def resolved-config [
 # Back up, restore, update, and verify a machine from a private Reseed state repository.
 def main [] {
   help main
+}
+
+# Refresh an already-initialized private state root from the provided Git
+# repository. Bootstrap helper used before restore; it does not load the
+# configuration, so it works even when config/recovery.nuon is missing locally.
+def "main sync-state" [
+  --state-root (-s): string = "" # Private state directory; overrides RESEED_STATE_ROOT and ~/.local/share/reseed.
+  --repository: string # Private state repository URL to fast-forward from.
+] {
+  if ($repository | str trim | is-empty) {
+    fail "sync-state requires --repository"
+  }
+  let state = (resolved-state-root $state_root)
+  git-sync $state $repository
 }
 
 # Create or validate a private state repository and initialize it with Git.
