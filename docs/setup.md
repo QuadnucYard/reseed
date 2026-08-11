@@ -30,7 +30,7 @@ Every command accepts `--yes` (apply defaults without prompting), `--dry-run`
 | `ssh-local` | SSH agent and `~/.ssh/id_ed25519` generation |
 | `ssh-remote` | Public key on every host in `setup.ssh.hosts`; admin entries also update the host's admin allow list |
 | `ssh` | Local keys, remote hosts, and passwordless-login tests |
-| `gh` | GitHub CLI authentication and SSH key upload |
+| `gh` | GitHub CLI authentication and SSH key upload (protocol-aware; HTTPS repositories drive gh auth, the Git credential helper, and repository probing instead) |
 | `gpg` | GnuPG key generation, GitHub upload, Git and jj signing configuration, and a signed-commit check |
 
 ## Wizard behavior
@@ -73,6 +73,17 @@ Uploads go through the `gh` CLI:
 
 - SSH keys use the `admin:public_key` scope.
 - GPG keys use the `write:gpg_key` scope.
+
+The `gh` purpose is routed by provider and transport through data-driven
+descriptors, and the default `reseed setup` builds its plan from the same
+provider-aware subplans. GitHub URLs drive the `gh` CLI: SSH URLs
+(`git@github.com:...`, `ssh://...`) generate and upload a key and verify SSH
+login, while HTTPS URLs authenticate `gh`, install the Git credential helper
+(`gh auth setup-git`), and run a bounded repository probe. Other Git hosts
+(GitLab, self-hosted) skip the GitHub-specific `gh` and GPG upload steps and
+run the generic transport check instead, so a default setup never uploads keys
+or authenticates against the wrong host. New providers only need a descriptor
+entry.
 
 The wizard detects a missing or invalid login (including a revoked token) and
 offers `gh auth login`; when a scope is missing it offers `gh auth refresh

@@ -31,8 +31,8 @@ export def winget-status [
   root: path # Private state root.
   config: record # Loaded configuration.
 ]: nothing -> record {
-  let enabled = ($config.software.winget.enabled? | default false)
-  let manifests = ($config.software.winget.manifests? | default [])
+  let enabled = (($config.software? | default {}).winget? | default {}).enabled? | default false
+  let manifests = (($config.software? | default {}).winget? | default {}).manifests? | default []
   {
     tool: winget
     enabled: $enabled
@@ -50,7 +50,7 @@ export def winget-restore [
   config: record # Loaded configuration.
   --dry-run # Show the imports without running them.
 ]: nothing -> int {
-  let settings = $config.software.winget
+  let settings = (($config.software? | default {}).winget? | default {})
   if not ($settings.enabled? | default false) or ((detect-os) != "windows") { return 0 }
   if not (command-exists winget) and not $dry_run { error make {msg: "WinGet is required for the Windows package stage"} }
   mut failures = 0
@@ -75,7 +75,7 @@ export def winget-update [
   config: record # Loaded configuration.
   --dry-run # Show the upgrades without running them.
 ]: nothing -> int {
-  let settings = $config.software.winget
+  let settings = (($config.software? | default {}).winget? | default {})
   if not ($settings.enabled? | default false) or not ($settings.update? | default true) or ((detect-os) != "windows") { return 0 }
   if not (command-exists winget) and not $dry_run { warning "WinGet is unavailable; skipping Windows package updates"; return 0 }
   let ids = ($settings.manifests? | default [] | each {|manifest| native-winget-manifest-ids ($root | path join $manifest) } | flatten | uniq | sort)
@@ -139,7 +139,7 @@ export def winget-backup [
   --refresh-manifests # Replace the curated manifest with the live export.
   --dry-run # Show the export without running it.
 ] {
-  let settings = $config.software.winget
+  let settings = (($config.software? | default {}).winget? | default {})
   if not ($settings.enabled? | default false) or ((detect-os) != "windows") or not (command-exists winget) { return }
   let refresh = $refresh_manifests or ($settings.export_on_backup? | default false)
   let target = if $refresh {
@@ -163,7 +163,7 @@ export def winget-reconcile [
   config: record # Loaded configuration.
   --dry-run # Skip the live export.
 ]: nothing -> record {
-  let settings = $config.software.winget
+  let settings = (($config.software? | default {}).winget? | default {})
   if not ($settings.enabled? | default false) or ((detect-os) != "windows") {
     return {tool: winget applicable: false desired_only: [] observed_only: []}
   }
@@ -191,7 +191,7 @@ export def winget-verify [
   root: path # Private state root.
   config: record # Loaded configuration.
 ]: nothing -> list<record> {
-  let settings = $config.software.winget
+  let settings = (($config.software? | default {}).winget? | default {})
   if not ($settings.enabled? | default false) or ((detect-os) != "windows") { return [] }
   mut results = [{check: "winget executable" ok: (command-exists winget) detail: "required on Windows"}]
   for manifest in ($settings.manifests? | default []) {

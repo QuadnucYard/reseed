@@ -100,7 +100,39 @@ export def validate-config [
     (validate-software $root $config)
     (validate-chezmoi $root $config)
     (validate-setup $config)
+    (validate-git $config)
   ] | flatten
+}
+
+# Validate the optional git section. Repository URLs stored in state are
+# non-secret: HTTP credentials or tokens embedded in a git.url are rejected.
+def validate-git [
+  config: record # Loaded configuration.
+]: nothing -> list<record> {
+  let git = ($config.git? | default {})
+  mut issues = []
+  let remote = ($git.remote? | default null)
+  if $remote != null and ((($remote | describe) != "string") or (($remote | str trim) | is-empty)) {
+    $issues = ($issues | append {level: error area: git message: "git.remote must be a non-empty string"})
+  }
+  let branch = ($git.branch? | default null)
+  if $branch != null and ((($branch | describe) != "string") or (($branch | str trim) | is-empty)) {
+    $issues = ($issues | append {level: error area: git message: "git.branch must be a non-empty string"})
+  }
+  let url = ($git.url? | default null)
+  if $url == null { return $issues }
+  if (($url | describe) != "string") or (($url | str trim) | is-empty) {
+    return ($issues | append {level: error area: git message: "git.url must be a non-empty repository URL"})
+  }
+  let scrubbed = ($url | str replace --regex '(?i)^https?://[^/@\s]+@' "")
+  if $scrubbed != $url {
+    return ($issues | append {level: error area: git message: "git.url must not embed credentials; keep repository URLs non-secret"})
+  }
+  let plausible = (($url | str starts-with "http://") or ($url | str starts-with "https://") or ($url | str starts-with "ssh://") or ($url | str starts-with "git://") or ($url | str contains "@"))
+  if not $plausible {
+    return ($issues | append {level: error area: git message: "git.url must be an http(s), ssh, git, or scp-style repository URL"})
+  }
+  $issues
 }
 
 # Issue when the private state root lacks the .reseed-state sentinel.
@@ -119,7 +151,7 @@ def validate-chezmoi [
   root: path # Private state root.
   config: record # Loaded configuration.
 ]: nothing -> list<record> {
-  if ($config.chezmoi.enabled? | default false) and not (($root | path join ".chezmoiroot") | path exists) {
+  if (($config.chezmoi? | default {}).enabled? | default false) and not (($root | path join ".chezmoiroot") | path exists) {
     [{level: error area: chezmoi message: "The source is missing .chezmoiroot"}]
   } else {
     []

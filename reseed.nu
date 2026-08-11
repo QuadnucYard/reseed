@@ -1,10 +1,11 @@
 #!/usr/bin/env nu
 
 use lib/config.nu [load-config parse-profiles]
-use lib/core.nu [expand-home scrub-url]
+use lib/core.nu [expand-home fail scrub-url]
 use lib/git.nu [git-sync]
+use lib/repo.nu [repo-merge-abort repo-merge-continue]
 use lib/setup.nu [setup-wizard]
-use lib/workflow.nu [workflow-backup workflow-bundle workflow-init workflow-plan workflow-reconcile workflow-restore workflow-status workflow-update workflow-verify]
+use lib/workflow.nu [workflow-backup workflow-bundle workflow-init workflow-plan workflow-reconcile workflow-restore workflow-status workflow-summary workflow-sync workflow-update workflow-verify]
 use integrations/finder.nu [finder-restore finder-status finder-verify]
 
 # Absolute path of the directory containing this engine.
@@ -35,9 +36,20 @@ def resolved-config [
   load-config $state_root (parse-profiles $profiles)
 }
 
-# Back up, restore, update, and verify a machine from a private Reseed state repository.
-def main [] {
-  help main
+# Show the current machine status and the next recommended commands. Running
+# `reseed` with no subcommand prints a compact, instant summary from local and
+# cached facts: whether the fundamental software is in place, whether the local
+# state is initialized, configuration health, whether the machine is restored
+# to the current desired state, and the prioritized suggestions. Use
+# `reseed status` for the full online view with a remote probe.
+def main [
+  --profiles (-p): string = "" # Comma-separated profiles; defaults to those configured in recovery.nuon.
+  --state-root (-s): string = "" # Private state directory; overrides RESEED_STATE_ROOT and ~/.local/share/reseed.
+  --offline # Accepted for symmetry with `reseed status`; the summary is always local.
+] {
+  let state = (resolved-state-root $state_root)
+  let config = (try { load-config $state (parse-profiles $profiles) } catch { {} })
+  workflow-summary (engine-root) $state $config
 }
 
 # Refresh an already-initialized private state root from the provided Git
@@ -107,22 +119,25 @@ def "main plan" [
 def "main status" [
   --profiles (-p): string = "" # Comma-separated profiles; defaults to those configured in recovery.nuon.
   --state-root (-s): string = "" # Private state directory; overrides RESEED_STATE_ROOT and ~/.local/share/reseed.
+  --offline # Use local and cached repository facts instead of probing the remote.
 ] {
   let state = (resolved-state-root $state_root)
-  workflow-status $state (resolved-config $state $profiles)
+  let config = (try { load-config $state (parse-profiles $profiles) } catch { {} })
+  workflow-status (engine-root) $state $config --offline=$offline
 }
 
 # Recover software, dotfiles, and snapshots in dependency order, then verify them.
 def "main restore" [
   --profiles (-p): string = "" # Comma-separated profiles; defaults to those configured in recovery.nuon.
   --state-root (-s): string = "" # Private state directory; overrides RESEED_STATE_ROOT and ~/.local/share/reseed.
+  --state-source: path = "" # Immutable downloaded private-state source to import into --state-root first.
   --yes (-y) # Apply the recovery plan without asking for confirmation.
   --resume # Continue a matching interrupted restore and skip its completed stages.
   --dry-run # Show recovery actions without changing the machine.
   --skip-software # Skip native packages and mise-managed tools; still restore configuration and snapshots.
 ] {
   let state = (resolved-state-root $state_root)
-  workflow-restore (engine-root) $state (resolved-config $state $profiles) --yes=$yes --resume=$resume --dry-run=$dry_run --skip-software=$skip_software
+  workflow-restore (engine-root) $state (parse-profiles $profiles) --yes=$yes --resume=$resume --dry-run=$dry_run --skip-software=$skip_software --state-source=$state_source
 }
 
 # Capture managed dotfiles, software observations, and configured snapshots.
@@ -148,6 +163,41 @@ def "main update" [
   let state = (resolved-state-root $state_root)
   let selected = (parse-profiles $profiles)
   workflow-update (engine-root) $state (load-config $state $selected) $selected --yes=$yes --dry-run=$dry_run
+}
+
+# Synchronize the private state repository: attach a remote, fetch, fast-forward,
+# or merge while preserving local history. --commit reviews and commits dirty
+# state, --push publishes commits, and --continue/--abort finish or discard an
+# interrupted merge.
+def "main sync" [
+  --profiles (-p): string = "" # Comma-separated profiles; defaults to those configured in recovery.nuon.
+  --state-root (-s): string = "" # Private state directory; overrides RESEED_STATE_ROOT and ~/.local/share/reseed.
+  --remote-url: string = "" # Private state repository URL to attach (existing origin wins).
+  --commit # Review and commit dirty working-tree state.
+  --push # Publish local (or newly created) commits to the remote.
+  --yes (-y) # Skip confirmation prompts.
+  --continue # Finish an interrupted merge after resolving its conflicts.
+  --abort # Discard an interrupted merge and restore the pre-merge state.
+  --dry-run # Show the sync actions without changing the repository.
+] {
+  let state = (resolved-state-root $state_root)
+  if $continue and $abort { fail "--continue and --abort are mutually exclusive" }
+  let selected = (parse-profiles $profiles)
+  let config = (try { load-config $state $selected } catch { {} })
+  if $continue {
+    let result = (repo-merge-continue $state $config --push=$push --yes=$yes --dry-run=$dry_run)
+    if not $result.synced { fail ($result.detail? | default "could not continue the merge") }
+    info $result.detail
+    return
+  }
+  if $abort {
+    let result = (repo-merge-abort $state $config --dry-run=$dry_run)
+    if not $result.synced { fail ($result.detail? | default "could not abort the merge") }
+    info $result.detail
+    return
+  }
+  let result = (workflow-sync (engine-root) $state $selected --remote-url=$remote_url --commit=$commit --push=$push --yes=$yes --dry-run=$dry_run)
+  if not $result.synced and not $dry_run { fail ($result.detail? | default $"sync did not complete: ($result.status)") }
 }
 
 # Compare desired software with installed software without changing either.

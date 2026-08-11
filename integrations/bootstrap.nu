@@ -26,7 +26,8 @@ def tool-version [
   # "chezmoi version v2.57.0" -> "v2.57.0", mise trailing dates are skipped.
   let tokens = ($text | lines | first | split row " " | where {|field| $field != "" and ($field =~ '^[vV]?[0-9]') })
   if ($tokens | is-empty) { return "" }
-  $tokens.0
+  # Strip trailing punctuation so "v2.72.0, commit ..." reports "v2.72.0".
+  $tokens.0 | str replace --regex '[^\w.+\-~]+$' ""
 }
 
 # The bootstrap contract with per-tool availability and installed version
@@ -141,7 +142,10 @@ export def bootstrap-latest []: nothing -> record {
   match (detect-os) {
     "macos" => (brew-outdated)
     "windows" => (winget-outdated)
-    _ => {}
+    # An empty record literal is inferred as `nothing` by Nushell. Build the
+    # empty record through a typed intermediate so unsupported platforms keep
+    # the advisory check as a true no-op.
+    _ => ({placeholder: null} | reject placeholder)
   }
 }
 

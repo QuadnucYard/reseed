@@ -1,11 +1,15 @@
 use std assert
 use ./helpers.nu *
+use ../lib/core.nu [detect-os]
 use ../lib/config.nu [config-fingerprint deep-merge load-config parse-profiles validate-config]
+use ../lib/advice.nu [recommend]
+use ../lib/import.nu [import-state-source state-source-probe]
 use ../lib/git.nu [git-sync]
+use ../lib/repo.nu [import-record-load merge-intent-clear merge-intent-load merge-intent-save repo-merge-abort repo-merge-continue repo-probe repo-push repo-refresh repo-sync]
 use ../lib/prelude.nu *
-use ../lib/workflow.nu [sync-engine-files workflow-init workflow-plan workflow-verification-tools]
+use ../lib/workflow.nu [prepare-state sync-engine-files workflow-init workflow-plan workflow-status-facts workflow-verification-tools]
 use ../lib/secrets.nu [commit-change-summary scan-commit-secrets secret-content-matches secret-name-matches]
-use ../integrations/bootstrap.nu [bootstrap-brew-items bootstrap-outdated bootstrap-tools bootstrap-winget-ids parse-brew-outdated parse-winget-upgrade-table]
+use ../integrations/bootstrap.nu [bootstrap-brew-items bootstrap-latest bootstrap-outdated bootstrap-tools bootstrap-winget-ids parse-brew-outdated parse-winget-upgrade-table]
 use ../integrations/homebrew.nu [brewfile-items brewfile-summary homebrew-env homebrew-mirror-label homebrew-persist-env homebrew-shell-snippets native-brewfile-items parse-outdated-names]
 use ../integrations/managers/cargo_binstall.nu [cargo-binstall-args cargo-binstall-packages]
 use ../integrations/mise.nu [mise-configure-shells mise-install-plan mise-reconcile mise-shell-task mise-shell-task-environment]
@@ -28,10 +32,19 @@ def with-temp-dir [template: string body: closure] {
 }
 
 # Set a local Git identity on a disposable repository so commits work on CI
-# runners that have no user.name/user.email configured globally.
+# runners that have no user.name/user.email configured globally, and disable
+# commit signing locally so a host that enables GPG signing cannot break the
+# behavior tests. Together with the isolated GIT_CONFIG_GLOBAL in main, test
+# repositories never inherit the host's signing configuration.
 def configure-git-identity [repo: path] {
   run-command git ["-C" ($repo | into string) "config" "user.email" "reseed@example.com"] --quiet | ignore
   run-command git ["-C" ($repo | into string) "config" "user.name" "Reseed Test"] --quiet | ignore
+  run-command git ["-C" ($repo | into string) "config" "commit.gpgsign" "false"] --quiet | ignore
+}
+
+# A minimal git configuration used by sync tests.
+def test-git-config []: nothing -> record {
+  {git: {remote: origin branch: main}}
 }
 
 # Configuration loading: deep merge, profile parsing, command display and
@@ -131,6 +144,7 @@ def test-bootstrap-contract [] {
 # Outdated-tool detection: both Homebrew output formats and the WinGet
 # upgrade table parse into name -> latest records.
 def test-bootstrap-updates [] {
+  assert eq (bootstrap-latest | describe) "record" "unsupported platforms return an empty bootstrap update record"
   let brew_old = "git 2.47.1 < 2.48.0\nfish 3.7.1 < 3.7.2\nchezmoi 2.57.0 < 2.58.0"
   assert eq (parse-brew-outdated $brew_old) {git: "2.48.0" chezmoi: "2.58.0"} "brew outdated parses the old format"
   let brew_new = "git (installed: 2.47.1) != 2.48.0\nnushell (installed: 0.114.1) != 0.115.0"
@@ -805,7 +819,10 @@ def test-git-sync [] {
     let origin_probe = (run-command git ["-C" ($fresh | into string) "remote" "get-url" "origin"] --allow-failure --quiet --capture)
     assert ne $origin_probe.exit_code 0 "failed sync leaves origin unset"
 
-    # A readable Git source without a main branch is rejected before syncing.
+    # A source whose default branch is not main is honored: git-sync resolves
+    # the default branch from the remote's symbolic HEAD instead of assuming
+    # main, and adopts it onto a sentinel-marked root that is not yet a
+    # repository.
     let master_seed = ($sandbox | path join "master-seed")
     run-command git ["init" "-b" "master" ($master_seed | into string)] --quiet | ignore
     configure-git-identity $master_seed
@@ -816,11 +833,14 @@ def test-git-sync [] {
     run-command git ["init" "--bare" ($master_origin | into string)] --quiet | ignore
     run-command git ["-C" ($master_seed | into string) "remote" "add" "origin" ($master_origin | into string)] --quiet | ignore
     run-command git ["-C" ($master_seed | into string) "push" "origin" "master"] --quiet | ignore
-    let no_main = (try {
-      git-sync $fresh ($master_origin | into string)
-      ""
-    } catch {|error| $error.msg? | default ($error | to nuon) })
-    assert (($no_main | str contains "no main branch")) "source without a main branch is rejected"
+    let master_root = ($sandbox | path join "master-root")
+    mkdir $master_root
+    ".reseed-state\n" | save ($master_root | path join ".reseed-state")
+    let master_sync = (git-sync $master_root ($master_origin | into string))
+    assert $master_sync.synced "a non-main default branch syncs"
+    let master_head = (run-command git ["-C" ($master_root | into string) "rev-parse" "--abbrev-ref" "HEAD"] --quiet --capture)
+    assert eq ($master_head.stdout | str trim) "master" "git-sync adopts the remote default branch"
+    assert (($master_root | path join "x.txt") | path exists) "non-main adoption copies the provided state"
 
     # A template-seeded root (unborn branch, no commits) adopts the provided
     # repository wholesale, preserving non-colliding untracked files.
@@ -920,36 +940,704 @@ def test-init-reseeds-incomplete-seed [
   }
 }
 
+# The status facts stay usable when the state root is missing, Git is absent,
+# or the configuration cannot be loaded: the default `reseed` summary and
+# `reseed status` must never crash on an uninitialized machine.
+def test-status-facts-robust [] {
+  let missing = "C:\\nonexistent\\reseed-state"
+  let facts = (workflow-status-facts "C:\\workspaces\\winbackup" $missing {})
+  assert eq $facts.phase "uninitialized" "a missing root reports uninitialized"
+  assert (not $facts.config_ok) "an unloadable configuration is reported"
+  assert eq $facts.git_available (command-exists git) "git availability is reported"
+  assert (not $facts.restored) "a missing root is never restored"
+  let empty_git = {git: {remote: "mine" branch: "work"}}
+  assert eq (repo-probe $missing $empty_git --offline).remote_name "mine" "probe honors configured remote names"
+}
+
+
+# After bundle/raw recovery the configured git.url must be installed as the
+# named remote, so a bare `reseed sync` (no --remote-url) can fetch, merge, and
+# the recommended `sync --push` actually publishes.
+def test-git-url-attachment [state_root: path] {
+  if not (command-exists git) { return }
+  with-temp-dir "reseed-giturl.XXXXXXXX" {|sandbox|
+    let origin = (make-state-origin $sandbox "giturl" $state_root)
+    let bundled = (sync-clone $sandbox "giturl-bundled" $origin)
+    run-command git ["-C" ($bundled | into string) "remote" "remove" "origin"] --quiet | ignore
+    let bundled_head = (run-command git ["-C" ($bundled | into string) "rev-parse" "HEAD"] --quiet --capture)
+    let bundle_out = ($sandbox | path join "giturl-bundle.tar.gz")
+    make-state-bundle $bundled $bundle_out ($bundled_head.stdout | str trim)
+    let local = ($sandbox | path join "local")
+    import-state-source $local $bundle_out [personal] | ignore
+    let cfg = {git: {remote: origin branch: main url: ($origin | into string)}}
+    let synced = (repo-sync $local $cfg --yes)
+    assert $synced.synced "a bare sync with git.url succeeds"
+    let remote_url = (run-command git ["-C" ($local | into string) "remote" "get-url" "origin"] --allow-failure --quiet --capture)
+    assert eq ($remote_url.stdout | str trim) ($origin | into string) "git.url is installed as the origin remote"
+    "local change\n" | save --append ($local | path join "mise.toml")
+    let pushed = (repo-sync $local $cfg --commit --push --yes)
+    assert eq $pushed.status "pushed" "the recommended sync --push publishes after git.url attachment"
+  }
+}
+
+
+# The bare `reseed` and `reseed status` CLI entrypoints must not crash when the
+# state root is missing or the configuration cannot be loaded.
+def test-cli-robustness [engine_root: path] {
+  with-temp-dir "reseed-cli-test.XXXXXXXX" {|sandbox|
+    let missing = ($sandbox | path join "missing-state-root")
+    let script = ($engine_root | path join "reseed.nu")
+    for entry in [
+      {name: summary args: [$script "--state-root" ($missing | into string)]}
+      {name: status args: [$script "status" "--state-root" ($missing | into string) "--offline"]}
+    ] {
+      let run = (run-command nu $entry.args --allow-failure --quiet --capture)
+      let detail = (($run.stderr + $run.stdout) | str trim)
+      assert eq $run.exit_code 0 $"the CLI ($entry.name) survives a missing state root: ($detail)"
+    }
+  }
+}
+
+# The pure recommendation layer: every detected phase yields a prioritized,
+# copy-pasteable command, with the required restore -> setup -> sync
+# progression and exact quoting of paths.
+def test-recommendations [engine_root: path] {
+  let context = {engine_root: ($engine_root | into string) profiles: [personal] remote_url: ""}
+  let root = ($engine_root | path join "state with spaces")
+
+  # Conflict resolution is the top priority.
+  let merge_facts = {phase: merge-in-progress state_root: ($root | into string) git_available: true repository: true sentinel: true committed: true clean: false branch: main remote_url: "" ahead: null behind: null remote: {reachable: null} config_ok: true restored: false}
+  let merge_recs = (recommend $merge_facts $context)
+  assert eq ($merge_recs | get priority | first) 1 "merge conflicts are the top priority"
+  assert (($merge_recs | get commands | first | any {|cmd| $cmd | str contains "--continue" })) "merge recommendation includes sync --continue"
+  assert (($merge_recs | get commands | first | any {|cmd| $cmd | str contains "--abort" })) "merge recommendation includes sync --abort"
+  assert (not ($merge_recs | get commands | first | any {|cmd| $cmd | str contains "git -C" })) "the merge recommendation does not suggest staging before resolution"
+  assert (($merge_recs | get title | first) | str contains "resolving") "the merge title directs resolving and staging first"
+
+  # Missing Git recommends installing the prerequisite.
+  let no_git = {phase: no-git state_root: ($root | into string) git_available: false repository: false sentinel: false committed: false clean: null branch: "" remote_url: "" ahead: null behind: null remote: {reachable: null} config_ok: false restored: false}
+  let no_git_recs = (recommend $no_git $context)
+  assert eq ($no_git_recs | get priority | first) 3 "missing Git is a prerequisite recommendation"
+  let git_install = ($no_git_recs | get commands | first | first)
+  let expected_git_install = match (detect-os) {
+    windows => "Git.Git"
+    macos => "brew install git"
+    _ => "install git through your system package manager"
+  }
+  assert ($git_install | str contains $expected_git_install) "the platform-specific Git install command is rendered"
+
+  # Uninitialized state is repaired before anything else.
+  let uninit = {phase: uninitialized state_root: ($root | into string) git_available: true repository: false sentinel: false committed: false clean: null branch: "" remote_url: "" ahead: null behind: null remote: {reachable: null} config_ok: false restored: false}
+  let uninit_recs = (recommend $uninit $context)
+  assert eq ($uninit_recs | get priority | first) 2 "uninitialized state is a repair priority"
+  assert (($uninit_recs | get commands | first | any {|cmd| $cmd | str contains "restore --state-source" })) "repair recommends the restore import command"
+
+  # An unborn seed is adopted or committed.
+  let unborn = {phase: unborn state_root: ($root | into string) git_available: true repository: true sentinel: true committed: false clean: null branch: main remote_url: "https://example.com/state.git" ahead: null behind: null remote: {reachable: null} config_ok: true restored: false}
+  let unborn_recs = (recommend $unborn $context)
+  assert eq ($unborn_recs | get priority | first) 2 "an unborn seed is a repair priority"
+  assert (($unborn_recs | get commands | first | any {|cmd| $cmd | str contains "--remote-url https://example.com/state.git" })) "unborn repair renders the known remote URL"
+
+  # A dirty, never-restored machine gets the restore -> sync progression with
+  # exact quoting of the state root path.
+  let dirty = {phase: dirty state_root: ($root | into string) git_available: true repository: true sentinel: true committed: true clean: false branch: main remote_url: "https://example.com/state.git" ahead: 1 behind: 0 remote: {reachable: true empty: false has_branch: true} config_ok: true restored: false}
+  let dirty_recs = (recommend $dirty $context)
+  assert eq ($dirty_recs | get priority) [4 6] "dirty recommends restore then sync"
+  assert (($dirty_recs | where priority == 4 | get title | first) | str contains "Restore") "restore recommendation title"
+  assert (($dirty_recs | where priority == 6 | get title | first) | str contains "Synchronize") "sync recommendation title"
+  let dirty_cmd = ($dirty_recs | where priority == 6 | get commands | first | first)
+  assert ($dirty_cmd | str contains "--commit --push") "dirty sync recommends committing and pushing"
+  assert ($dirty_cmd | str contains "state with spaces") "paths with spaces are rendered"
+  assert ($dirty_cmd | str contains "\"") "paths with spaces are quoted"
+
+  # An unreachable remote on a never-restored machine yields the full
+  # restore -> setup -> sync progression in priority order.
+  let inaccessible = {phase: inaccessible state_root: ($root | into string) git_available: true repository: true sentinel: true committed: true clean: true branch: main remote_url: "https://example.com/state.git" ahead: null behind: null remote: {reachable: false} config_ok: true restored: false}
+  let inacc_recs = (recommend $inaccessible $context)
+  assert eq ($inacc_recs | get priority) [4 5 6] "inaccessible recommends restore, then access setup, then sync"
+  assert (($inacc_recs | get phase) == [restore access sync]) "the progression is restore -> setup -> sync"
+  assert (($inacc_recs | where priority == 5 | get commands | first | any {|cmd| $cmd | str contains "setup gh" })) "access setup recommends the gh setup"
+
+  # A synchronized, already-restored machine reports completion with no work.
+  let synced = {phase: clean-synced state_root: ($root | into string) git_available: true repository: true sentinel: true committed: true clean: true branch: main remote_url: "https://example.com/state.git" ahead: 0 behind: 0 remote: {reachable: true empty: false has_branch: true} config_ok: true restored: true}
+  let synced_recs = (recommend $synced $context)
+  assert eq ($synced_recs | get priority) [7] "synchronized completion is the last recommendation"
+  assert eq ($synced_recs | get commands | first) [] "synchronized completion has no commands"
+}
+
+# State source import: git checkouts, raw snapshots, bundle provenance,
+# invalid sources, atomic failure, identical reruns, differing existing local
+# state, and dry runs.
+def test-import [engine_root: path, state_root: path] {
+  if not (command-exists git) { return }
+  let cfg = (test-git-config)
+  with-temp-dir "reseed-import-test.XXXXXXXX" {|sandbox|
+    # A raw snapshot imports into a fresh root and creates a committed repo.
+    let src = ($sandbox | path join "source")
+    mkdir $src
+    for entry in (ls --all $state_root) { cp --recursive $entry.name $src }
+    let dest = ($sandbox | path join "state")
+    let result = (import-state-source $dest $src [personal])
+    assert eq $result.status "imported" "raw snapshot imports"
+    assert eq $result.kind "raw-snapshot" "raw source kind"
+    assert (($dest | path join "config" "recovery.nuon") | path exists) "imported config is present"
+    assert (($dest | path join ".reseed-state") | path exists) "imported sentinel is present"
+    let probe = (repo-probe $dest $cfg)
+    assert $probe.repository "import initializes a repository"
+    assert $probe.committed "import creates a snapshot commit"
+
+    # An identical rerun is a no-op.
+    let again = (import-state-source $dest $src [personal])
+    assert eq $again.status "no-op" "identical rerun is a no-op"
+    assert eq $again.fingerprint $result.fingerprint "unchanged source fingerprint"
+
+    # A source equal to the destination is refused.
+    let same = (try { import-state-source $src $src [personal]; "" } catch {|e| $e.msg? | default "" })
+    assert ($same | str contains "--state-source must differ") "source equal to destination is refused"
+
+    # An invalid source fails validation and leaves the destination untouched.
+    let invalid = ($sandbox | path join "invalid")
+    mkdir $invalid
+    "no sentinel\n" | save ($invalid | path join "x.txt")
+    let rejected = (try { import-state-source $dest $invalid [personal]; "" } catch {|e| $e.msg? | default "" })
+    assert ($rejected | str contains ".reseed-state") "source without a sentinel is rejected"
+    assert (($dest | path join "config" "recovery.nuon") | path exists) "failed import leaves the destination untouched"
+    let backups = (glob ((($sandbox | into string | str replace --all "\\" "/")) + "/.reseed-import-*"))
+    assert ($backups | is-empty) "failed imports leave no staging backup behind"
+
+    # A different source against an initialized root is refused without
+    # modifying either location.
+    let other = ($sandbox | path join "other")
+    mkdir $other
+    for entry in (ls --all $state_root) { cp --recursive $entry.name $other }
+    "extra\n" | save ($other | path join "extra.txt")
+    let refused = (try { import-state-source $dest $other [personal]; "" } catch {|e| $e.msg? | default "" })
+    assert ($refused | str contains "Refusing") "a different source over initialized state is refused"
+    assert (not (($dest | path join "extra.txt") | path exists)) "refused import does not modify the destination"
+
+    # Dry runs validate and report without writing.
+    let dry_dest = ($sandbox | path join "dry-state")
+    let dry = (import-state-source $dry_dest $src [personal] --dry-run)
+    assert eq $dry.status "would-import" "dry run reports the import"
+    assert (not ($dry_dest | path exists)) "dry run does not create the destination"
+
+    # A git-checkout source imports with its history, overlay modified,
+    # deleted, and non-ignored untracked files.
+    let git_src = ($sandbox | path join "git-source")
+    mkdir $git_src
+    for entry in (ls --all $state_root) { cp --recursive $entry.name $git_src }
+    run-command git ["-C" ($git_src | into string) "init" "-q" "-b" "main"] --quiet | ignore
+    configure-git-identity $git_src
+    run-command git ["-C" ($git_src | into string) "add" "--all"] --quiet | ignore
+    run-command git ["-C" ($git_src | into string) "commit" "-m" "state base"] --quiet | ignore
+    "untracked note\n" | save ($git_src | path join "note.txt")
+    "modified\n" | save --append ($git_src | path join "home" "dot_config" "starship.toml")
+    run-command git ["-C" ($git_src | into string) "rm" "--quiet" "config/profiles/work.nuon.example"] --quiet | ignore
+    let git_dest = ($sandbox | path join "git-state")
+    let git_result = (import-state-source $git_dest $git_src [personal])
+    assert eq $git_result.kind "git-checkout" "git checkout source detected"
+    assert (($git_dest | path join "note.txt") | path exists) "untracked files are imported"
+    assert ((open --raw ($git_dest | path join "home" "dot_config" "starship.toml")) | str contains "modified") "modified files are imported"
+    assert (not (($git_dest | path join "config" "profiles" "work.nuon.example") | path exists)) "deleted files are removed"
+    let git_head = (run-command git ["-C" ($git_dest | into string) "rev-parse" "HEAD"] --quiet --capture)
+    let src_head = (run-command git ["-C" ($git_src | into string) "rev-parse" "HEAD"] --quiet --capture)
+    assert eq ($git_head.stdout | str trim) ($src_head.stdout | str trim) "git checkout import keeps the source history"
+    assert (not (($git_dest | path join ".git") | path join "objects" | path exists | false)) "git history is imported"
+    assert ((open --raw ($git_src | path join "note.txt")) | str contains "untracked note") "the source is left byte-for-byte unchanged"
+
+    # A bundle source retains its state_revision provenance.
+    let committed = ($sandbox | path join "committed")
+    mkdir $committed
+    for entry in (ls --all $state_root) { cp --recursive $entry.name $committed }
+    run-command git ["-C" ($committed | into string) "init" "-q" "-b" "main"] --quiet | ignore
+    configure-git-identity $committed
+    run-command git ["-C" ($committed | into string) "add" "--all"] --quiet | ignore
+    run-command git ["-C" ($committed | into string) "commit" "-m" "bundled state"] --quiet | ignore
+    let head = (run-command git ["-C" ($committed | into string) "rev-parse" "HEAD"] --quiet --capture)
+    let bundle_out = ($sandbox | path join "state-bundle.tar.gz")
+    make-state-bundle $committed $bundle_out ($head.stdout | str trim)
+    let bundle_dest = ($sandbox | path join "bundle-state")
+    let bundle_result = (import-state-source $bundle_dest $bundle_out [personal])
+    assert eq $bundle_result.kind "bundle" "bundle source detected"
+    assert eq $bundle_result.revision ($head.stdout | str trim) "bundle state_revision retained"
+    assert (($bundle_dest | path join "config" "recovery.nuon") | path exists) "bundle state imported"
+    let record = (import-record-load $bundle_dest {})
+    assert eq $record.state_revision ($head.stdout | str trim) "import record preserves the bundle revision"
+
+    # Paths containing spaces import and commit correctly (both the source and
+    # the destination root).
+    let spaced_src = ($sandbox | path join "spaced source")
+    mkdir $spaced_src
+    for entry in (ls --all $state_root) { cp --recursive $entry.name ($spaced_src | path join ($entry.name | path basename)) }
+    let spaced_dest = ($sandbox | path join "spaced destination")
+    let spaced = (import-state-source $spaced_dest $spaced_src [personal])
+    assert eq $spaced.status "imported" "a state source with spaces imports"
+    assert (($spaced_dest | path join "config" "recovery.nuon") | path exists) "a spaced destination receives the state"
+    let spaced_probe = (repo-probe $spaced_dest $cfg)
+    assert $spaced_probe.committed "a spaced destination is a committed repository"
+
+    # A host that enables commit signing (without a usable key) must not block
+    # recovery: the synthetic import commit is created with signing disabled.
+    with-temp-dir "reseed-import-signing.XXXXXXXX" {|signing_cfg_dir|
+      let signing_cfg = ($signing_cfg_dir | path join "gitconfig")
+      "[commit]\n\tgpgsign = true\n[user]\n\tsigningkey = 0000000000000000000000000000000000000000\n" | save $signing_cfg
+      let signed_dest = ($sandbox | path join "signed-state")
+      let imported = (with-env {GIT_CONFIG_GLOBAL: ($signing_cfg | into string)} {
+        import-state-source $signed_dest $src [personal]
+      })
+      assert eq $imported.status "imported" "an import succeeds even when the host enables commit signing"
+      let head_commit = (run-command git ["-C" ($signed_dest | into string) "cat-file" "commit" "HEAD"] --quiet --capture)
+      assert (not ($head_commit.stdout | str contains "gpgsig")) "the synthetic import commit is not signed"
+    }
+  }
+}
+
+# A minimal offline bundle for a committed state repository: reseed/bundle.nuon
+# with the recorded state_revision plus the archived state snapshot.
+def make-state-bundle [committed: path, output: path, revision: string] {
+  let staging = (mktemp --directory)
+  try {
+    mkdir ($staging | path join "reseed" "state")
+    run-command git ["-C" ($committed | into string) "archive" "--format=tar" "--output" ($staging | path join "state.tar") "HEAD"] --quiet | ignore
+    run-command tar ["-xf" ($staging | path join "state.tar") "-C" ($staging | path join "reseed" "state")] --quiet | ignore
+    rm ($staging | path join "state.tar")
+    {schema: 1 platform: "test" state_revision: $revision} | to nuon --indent 2 | save --force ($staging | path join "reseed" "bundle.nuon")
+    run-command tar ["-czf" ($output | into string) "-C" ($staging | into string) "reseed"] --quiet | ignore
+  } finally { rm --recursive --force $staging }
+}
+
+# A bare origin and a clone at the same commit, with local identity configured.
+def sync-origin [sandbox: path, name: string]: nothing -> path {
+  let origin = ($sandbox | path join $"($name).git")
+  run-command git ["init" "--bare" "-q" "-b" "main" ($origin | into string)] --quiet | ignore
+  let seed = ($sandbox | path join $"($name)-seed")
+  run-command git ["init" "-q" "-b" "main" ($seed | into string)] --quiet | ignore
+  configure-git-identity $seed
+  "base\n" | save ($seed | path join "seed.txt")
+  run-command git ["-C" ($seed | into string) "add" "--all"] --quiet | ignore
+  run-command git ["-C" ($seed | into string) "commit" "-m" "seed"] --quiet | ignore
+  run-command git ["-C" ($seed | into string) "remote" "add" "origin" ($origin | into string)] --quiet | ignore
+  run-command git ["-C" ($seed | into string) "push" "-u" "origin" "main"] --quiet | ignore
+  $origin
+}
+
+# A fresh clone of an origin with local identity configured.
+def sync-clone [sandbox: path, name: string, origin: path]: nothing -> path {
+  let clone = ($sandbox | path join $name)
+  run-command git ["clone" "-q" ($origin | into string) ($clone | into string)] --quiet | ignore
+  configure-git-identity $clone
+  $clone
+}
+
+# Advance an origin by one commit from a sibling clone.
+def advance-origin [sandbox: path, name: string, origin: path, content: string, file: string = "rival.txt"] {
+  let sibling = (sync-clone $sandbox $name $origin)
+  $content | save ($sibling | path join $file)
+  run-command git ["-C" ($sibling | into string) "add" "--all"] --quiet | ignore
+  run-command git ["-C" ($sibling | into string) "commit" "-m" $"add ($file)"] --quiet | ignore
+  run-command git ["-C" ($sibling | into string) "push" "origin" "main"] --quiet | ignore
+}
+
+# A bare origin whose main branch contains a valid private-state tree.
+def make-state-origin [sandbox: path, name: string, state_root: path]: nothing -> path {
+  let origin = ($sandbox | path join $"($name).git")
+  run-command git ["init" "--bare" "-q" "-b" "main" ($origin | into string)] --quiet | ignore
+  let seed = ($sandbox | path join $"($name)-seed")
+  mkdir $seed
+  for entry in (ls --all $state_root) { cp --recursive $entry.name ($seed | path join ($entry.name | path basename)) }
+  run-command git ["-C" ($seed | into string) "init" "-q" "-b" "main"] --quiet | ignore
+  configure-git-identity $seed
+  run-command git ["-C" ($seed | into string) "add" "--all"] --quiet | ignore
+  run-command git ["-C" ($seed | into string) "commit" "-m" "state"] --quiet | ignore
+  run-command git ["-C" ($seed | into string) "remote" "add" "origin" ($origin | into string)] --quiet | ignore
+  run-command git ["-C" ($seed | into string) "push" "-u" "origin" "main"] --quiet | ignore
+  $origin
+}
+
+# The sync matrix: first attachment, fast-forward, ahead push, dirty commit,
+# divergence, conflicts with continue/abort, empty remotes, push races, missing
+# branches, detached/shallow repositories, inaccessible remotes, mismatches,
+# provenance-based merging, and unknown-base snapshot preservation.
+def test-repo-sync [engine_root: path, state_root: path] {
+  if not (command-exists git) { return }
+  let cfg = (test-git-config)
+  with-temp-dir "reseed-syncmatrix.XXXXXXXX" {|sandbox|
+    # First attachment: an unborn sentinel root adopts the remote.
+    let origin = (sync-origin $sandbox "attach")
+    let root = ($sandbox | path join "attach-root")
+    run-command git ["init" "-q" "-b" "main" ($root | into string)] --quiet | ignore
+    ".reseed-state\n" | save ($root | path join ".reseed-state")
+    let attached = (repo-sync $root $cfg --remote-url=($origin | into string))
+    assert eq $attached.status "adopted" "first attachment adopts the remote"
+    assert (($root | path join "seed.txt") | path exists) "adoption copies the remote state"
+
+    # Fast-forward when behind.
+    let origin2 = (sync-origin $sandbox "ff")
+    let root2 = (sync-clone $sandbox "ff-root" $origin2)
+    advance-origin $sandbox "ff-rival" $origin2 "forward\n"
+    # A dry run must not mutate the repository: the remote-tracking ref stays
+    # at its cached value and the working tree is untouched, and it reports the
+    # real phase (behind) instead of claiming synchronization.
+    let cached_before = (run-command git ["-C" ($root2 | into string) "rev-parse" "refs/remotes/origin/main"] --quiet --capture)
+    let dry = (repo-sync $root2 $cfg --dry-run)
+    let cached_after = (run-command git ["-C" ($root2 | into string) "rev-parse" "refs/remotes/origin/main"] --quiet --capture)
+    assert eq ($cached_after.stdout | str trim) ($cached_before.stdout | str trim) "sync --dry-run does not fetch or move remote-tracking refs"
+    assert (not (($root2 | path join "rival.txt") | path exists)) "sync --dry-run does not change the working tree"
+    assert eq $dry.status "behind" "sync --dry-run reports the real phase"
+    assert (not $dry.synced) "sync --dry-run never claims synchronization for a behind repo"
+    let ff = (repo-sync $root2 $cfg)
+    assert eq $ff.status "synced" "behind sync fast-forwards"
+    assert (($root2 | path join "rival.txt") | path exists) "fast-forward brings the remote change"
+
+    # Ahead: reported without --push, published with it.
+    let origin3 = (sync-origin $sandbox "ahead")
+    let root3 = (sync-clone $sandbox "ahead-root" $origin3)
+    "local commit\n" | save ($root3 | path join "local.txt")
+    run-command git ["-C" ($root3 | into string) "add" "--all"] --quiet | ignore
+    run-command git ["-C" ($root3 | into string) "commit" "-m" "local ahead"] --quiet | ignore
+    let ahead = (repo-sync $root3 $cfg)
+    assert eq $ahead.status "ahead" "ahead sync reports without pushing"
+    let pushed = (repo-sync $root3 $cfg --push)
+    assert eq $pushed.status "pushed" "ahead sync with --push publishes"
+    let remote_has = (run-command git ["ls-remote" ($origin3 | into string) "refs/heads/main"] --quiet --capture)
+    assert (($remote_has.stdout | str trim) != "") "the remote gained the pushed commit"
+
+    # Dirty state: refused without --commit, committed with it.
+    let origin4 = (sync-origin $sandbox "dirty")
+    let root4 = (sync-clone $sandbox "dirty-root" $origin4)
+    "uncommitted\n" | save --append ($root4 | path join "seed.txt")
+    let dirty = (repo-sync $root4 $cfg)
+    assert eq $dirty.status "dirty" "dirty sync refuses without --commit"
+    assert ((open --raw ($root4 | path join "seed.txt")) | str contains "uncommitted") "dirty refusal leaves the changes alone"
+    let committed = (repo-sync $root4 $cfg --commit --yes)
+    assert eq $committed.status "ahead" "dirty sync with --commit commits and reports the new commit"
+    let log = (run-command git ["-C" ($root4 | into string) "log" "-1" "--format=%s"] --quiet --capture)
+    assert ($log.stdout | str contains "Sync") "dirty sync commits with a sync message"
+    let committed_push = (repo-sync $root4 $cfg --push)
+    assert eq $committed_push.status "pushed" "the committed dirty state can be pushed"
+
+    # Divergence merges both histories.
+    let origin5 = (sync-origin $sandbox "diverge")
+    let root5 = (sync-clone $sandbox "diverge-root" $origin5)
+    "local file\n" | save ($root5 | path join "local.txt")
+    run-command git ["-C" ($root5 | into string) "add" "--all"] --quiet | ignore
+    run-command git ["-C" ($root5 | into string) "commit" "-m" "local work"] --quiet | ignore
+    advance-origin $sandbox "diverge-rival" $origin5 "remote file\n"
+    let merged = (repo-sync $root5 $cfg)
+    assert eq $merged.status "merged" "divergence merges both histories"
+    assert (($root5 | path join "local.txt") | path exists) "merge preserves local work"
+    assert (($root5 | path join "rival.txt") | path exists) "merge preserves remote work"
+
+    # Conflicts: sync --continue and sync --abort.
+    let origin6 = (sync-origin $sandbox "conflict")
+    let root6 = (sync-clone $sandbox "conflict-root" $origin6)
+    "local line\n" | save --force ($root6 | path join "seed.txt")
+    run-command git ["-C" ($root6 | into string) "add" "--all"] --quiet | ignore
+    run-command git ["-C" ($root6 | into string) "commit" "-m" "local seed"] --quiet | ignore
+    let rival6 = (sync-clone $sandbox "conflict-rival" $origin6)
+    "remote line\n" | save --force ($rival6 | path join "seed.txt")
+    run-command git ["-C" ($rival6 | into string) "add" "--all"] --quiet | ignore
+    run-command git ["-C" ($rival6 | into string) "commit" "-m" "remote seed"] --quiet | ignore
+    run-command git ["-C" ($rival6 | into string) "push" "origin" "main"] --quiet | ignore
+    let conflicted = (repo-sync $root6 $cfg)
+    assert eq $conflicted.status "conflicts" "divergence with overlapping edits conflicts"
+    assert ((merge-intent-load $root6 $cfg) != null) "merge intent is persisted outside the repository"
+
+    # Staging an unresolved conflict must not let sync --continue commit the
+    # markers: the staged diff is checked too.
+    run-command git ["-C" ($root6 | into string) "add" "--all"] --quiet | ignore
+    let staged_markers = (repo-merge-continue $root6 $cfg)
+    assert eq $staged_markers.status "conflicts" "sync --continue rejects staged conflict markers"
+    assert (not (($staged_markers.synced))) "staged markers are never committed"
+
+    let aborted = (repo-merge-abort $root6 $cfg)
+    assert eq $aborted.status "aborted" "sync --abort discards the merge"
+    assert ((merge-intent-load $root6 $cfg) == null) "abort clears the merge intent"
+    let after_abort = (run-command git ["-C" ($root6 | into string) "log" "-1" "--format=%s"] --quiet --capture)
+    assert eq ($after_abort.stdout | str trim) "local seed" "abort restores the pre-merge state"
+
+    let conflicted2 = (repo-sync $root6 $cfg)
+    assert eq $conflicted2.status "conflicts" "the merge is retried after abort"
+    "both lines\n" | save --force ($root6 | path join "seed.txt")
+    run-command git ["-C" ($root6 | into string) "add" "seed.txt"] --quiet | ignore
+    let completed = (repo-merge-continue $root6 $cfg)
+    assert eq $completed.status "completed" "sync --continue completes the resolved merge"
+    assert ((merge-intent-load $root6 $cfg) == null) "continue clears the merge intent"
+
+    # Empty remote: report, then publish.
+    let empty = ($sandbox | path join "empty.git")
+    run-command git ["init" "--bare" "-q" "-b" "main" ($empty | into string)] --quiet | ignore
+    let empty_root = ($sandbox | path join "empty-root")
+    run-command git ["init" "-q" "-b" "main" ($empty_root | into string)] --quiet | ignore
+    configure-git-identity $empty_root
+    ".reseed-state\n" | save ($empty_root | path join ".reseed-state")
+    "snapshot\n" | save ($empty_root | path join "state.txt")
+    run-command git ["-C" ($empty_root | into string) "add" "--all"] --quiet | ignore
+    run-command git ["-C" ($empty_root | into string) "commit" "-m" "local snapshot"] --quiet | ignore
+    let empty_report = (repo-sync $empty_root $cfg --remote-url=($empty | into string))
+    assert eq $empty_report.status "empty-remote" "an empty remote is reported without --push"
+    let empty_push = (repo-sync $empty_root $cfg --remote-url=($empty | into string) --push)
+    assert eq $empty_push.status "pushed" "an empty remote accepts the first push"
+    let empty_has = (run-command git ["ls-remote" ($empty | into string) "refs/heads/main"] --quiet --capture)
+    assert (($empty_has.stdout | str trim) != "") "the empty remote gained the branch"
+
+    # Missing branch: refuse to guess.
+    let dev_origin = ($sandbox | path join "dev.git")
+    run-command git ["init" "--bare" "-q" ($dev_origin | into string)] --quiet | ignore
+    let dev_seed = ($sandbox | path join "dev-seed")
+    run-command git ["init" "-q" "-b" "dev" ($dev_seed | into string)] --quiet | ignore
+    configure-git-identity $dev_seed
+    "dev\n" | save ($dev_seed | path join "dev.txt")
+    run-command git ["-C" ($dev_seed | into string) "add" "--all"] --quiet | ignore
+    run-command git ["-C" ($dev_seed | into string) "commit" "-m" "dev"] --quiet | ignore
+    run-command git ["-C" ($dev_seed | into string) "remote" "add" "origin" ($dev_origin | into string)] --quiet | ignore
+    run-command git ["-C" ($dev_seed | into string) "push" "-u" "origin" "dev"] --quiet | ignore
+    let dev_root = ($sandbox | path join "dev-root")
+    run-command git ["init" "-q" "-b" "main" ($dev_root | into string)] --quiet | ignore
+    configure-git-identity $dev_root
+    ".reseed-state\n" | save ($dev_root | path join ".reseed-state")
+    let missing = (repo-sync $dev_root $cfg --remote-url=($dev_origin | into string))
+    assert eq $missing.status "missing-branch" "a remote without the configured branch is refused"
+
+    # Push race: a push loses to a moved remote and the retry fast-forwards.
+    let origin7 = (sync-origin $sandbox "race")
+    let root7 = (sync-clone $sandbox "race-root" $origin7)
+    advance-origin $sandbox "race-rival" $origin7 "moved\n"
+    let race = (repo-push $root7 $cfg)
+    assert $race.ok "a lost push race retries once and fast-forwards"
+    assert (($root7 | path join "rival.txt") | path exists) "the race retry fetched the moved remote"
+
+    # Detached HEAD reattaches to the configured branch, and recovered commits
+    # made on the detached HEAD are preserved into the branch.
+    let origin8 = (sync-origin $sandbox "detached")
+    let root8 = (sync-clone $sandbox "detached-root" $origin8)
+    let base_sha = (run-command git ["-C" ($root8 | into string) "rev-parse" "HEAD"] --quiet --capture)
+    run-command git ["-C" ($root8 | into string) "checkout" "-q" ($base_sha.stdout | str trim)] --quiet | ignore
+    "recovered on detached\n" | save ($root8 | path join "detached-work.txt")
+    run-command git ["-C" ($root8 | into string) "add" "--all"] --quiet | ignore
+    run-command git ["-C" ($root8 | into string) "commit" "-m" "recovered detached commit"] --quiet | ignore
+    let reattached = (repo-sync $root8 $cfg)
+    assert eq $reattached.status "ahead" "a detached HEAD reattaches on sync and keeps its recovered commits ahead"
+    let branch = (run-command git ["-C" ($root8 | into string) "branch" "--show-current"] --quiet --capture)
+    assert eq ($branch.stdout | str trim) "main" "detached sync lands on the configured branch"
+    assert (($root8 | path join "detached-work.txt") | path exists) "detached recovered commits are preserved"
+    let detached_log = (run-command git ["-C" ($root8 | into string) "log" "--oneline"] --quiet --capture)
+    assert (($detached_log.stdout | str contains "recovered detached commit")) "the recovered detached commit survives reattachment"
+    let detached_push = (repo-sync $root8 $cfg --push)
+    assert eq $detached_push.status "pushed" "the preserved detached commits can be pushed"
+    let recovery_refs = (run-command git ["-C" ($root8 | into string) "for-each-ref" "refs/reseed/recovered"] --allow-failure --quiet --capture)
+    assert (($recovery_refs.stdout | str trim | is-empty)) "the detached recovery ref is cleaned up after reattachment"
+
+    # Shallow clones deepen and fast-forward. A file:// URL honors --depth so
+    # the fixture is genuinely shallow.
+    let origin9 = (sync-origin $sandbox "shallow")
+    let root9 = ($sandbox | path join "shallow-root")
+    let origin9_url = ($"file://($origin9 | into string)" | str replace --all "\\" "/")
+    run-command git ["clone" "-q" "--depth" "1" $origin9_url ($root9 | into string)] --quiet | ignore
+    configure-git-identity $root9
+    let shallow_probe = (repo-probe $root9 $cfg)
+    assert $shallow_probe.shallow "the fixture clone is genuinely shallow"
+    advance-origin $sandbox "shallow-rival" $origin9 "deeper\n"
+    let deepened = (repo-sync $root9 $cfg)
+    assert eq $deepened.status "synced" "a shallow clone deepens and fast-forwards on sync"
+    assert (($root9 | path join "rival.txt") | path exists) "the deepened clone has the remote change"
+    assert (not (repo-probe $root9 $cfg).shallow) "a sync resolves the shallow state entirely"
+
+    # An up-to-date shallow clone must not stay shallow forever: sync resolves
+    # the shallow state even when there is nothing to fetch.
+    let origin9b = (sync-origin $sandbox "shallow-tip")
+    let root9b = ($sandbox | path join "shallow-tip-root")
+    let origin9b_url = ($"file://($origin9b | into string)" | str replace --all "\\" "/")
+    run-command git ["clone" "-q" "--depth" "1" $origin9b_url ($root9b | into string)] --quiet | ignore
+    configure-git-identity $root9b
+    let tip_sync = (repo-sync $root9b $cfg)
+    assert $tip_sync.synced "an up-to-date shallow clone syncs cleanly"
+    assert (not (repo-probe $root9b $cfg).shallow) "an up-to-date shallow clone is resolved on sync"
+
+    # Read-only probing must compare against the actual remote tip from
+    # ls-remote, not the stale cache: an advanced remote is reported as behind,
+    # never as synchronized.
+    let originS = (sync-origin $sandbox "stale")
+    let rootS = (sync-clone $sandbox "stale-root" $originS)
+    advance-origin $sandbox "stale-rival" $originS "newer\n"
+    let stale_probe = (repo-probe $rootS $cfg --read-only)
+    assert eq $stale_probe.phase "behind" "read-only status reports an advanced remote as behind"
+    assert $stale_probe.remote_ahead "read-only status flags that the remote has advanced"
+    let stale_status = (workflow-status-facts $engine_root $rootS $cfg --offline=false)
+    assert eq $stale_status.phase "behind" "status facts never claim synchronization against a stale tip"
+
+    # A leftover recovery ref from a sync that crashed between switching to the
+    # branch and merging is consumed on the next sync.
+    let originL = (sync-origin $sandbox "leftover")
+    let rootL = (sync-clone $sandbox "leftover-root" $originL)
+    let base_sha = (run-command git ["-C" ($rootL | into string) "rev-parse" "HEAD"] --quiet --capture)
+    run-command git ["-C" ($rootL | into string) "checkout" "-q" ($base_sha.stdout | str trim)] --quiet | ignore
+    "recovered on detached\n" | save ($rootL | path join "recovered.txt")
+    run-command git ["-C" ($rootL | into string) "add" "--all"] --quiet | ignore
+    run-command git ["-C" ($rootL | into string) "commit" "-m" "detached recovery"] --quiet | ignore
+    let recovered_sha = (run-command git ["-C" ($rootL | into string) "rev-parse" "HEAD"] --quiet --capture)
+    run-command git ["-C" ($rootL | into string) "update-ref" "refs/reseed/recovered/main" ($recovered_sha.stdout | str trim)] --quiet | ignore
+    run-command git ["-C" ($rootL | into string) "switch" "-q" "main"] --quiet | ignore
+    let leftover_sync = (repo-sync $rootL $cfg)
+    assert ($leftover_sync.synced or $leftover_sync.status == "ahead") "a sync consumes a leftover detached recovery ref"
+    assert (($rootL | path join "recovered.txt") | path exists) "leftover recovered commits are merged into the branch"
+    let leftover_refs = (run-command git ["-C" ($rootL | into string) "for-each-ref" "refs/reseed/recovered"] --allow-failure --quiet --capture)
+    assert (($leftover_refs.stdout | str trim | is-empty)) "the consumed recovery ref is removed"
+
+    # Inaccessible remotes are reported.
+    let origin10 = (sync-origin $sandbox "unreachable")
+    let root10 = (sync-clone $sandbox "unreachable-root" $origin10)
+    run-command git ["-C" ($root10 | into string) "remote" "set-url" "origin" ($sandbox | path join "missing.git")] --quiet | ignore
+    let unreachable = (repo-sync $root10 $cfg)
+    assert eq $unreachable.status "inaccessible" "an unreachable remote is reported"
+
+    # Origin/config mismatches are refused.
+    let origin11 = (sync-origin $sandbox "origin")
+    let root11 = (sync-clone $sandbox "origin-root" $origin11)
+    let mismatched = (repo-sync $root11 $cfg --remote-url=($sandbox | path join "elsewhere.git"))
+    assert eq $mismatched.status "mismatched" "a requested URL differing from origin is refused"
+
+    # Provenance-based merging: a bundle snapshot rebases onto its recorded
+    # state_revision, so both the recovered changes and the remote history
+    # survive.
+    let origin12 = (make-state-origin $sandbox "provenance" $state_root)
+    let bundled = (sync-clone $sandbox "provenance-bundled" $origin12)
+    run-command git ["-C" ($bundled | into string) "remote" "remove" "origin"] --quiet | ignore
+    "recovered change\n" | save ($bundled | path join "recovered.txt")
+    run-command git ["-C" ($bundled | into string) "add" "--all"] --quiet | ignore
+    run-command git ["-C" ($bundled | into string) "commit" "-m" "recovered change"] --quiet | ignore
+    let bundled_head = (run-command git ["-C" ($bundled | into string) "rev-parse" "HEAD"] --quiet --capture)
+    let bundle_out = ($sandbox | path join "provenance-bundle.tar.gz")
+    make-state-bundle $bundled $bundle_out ($bundled_head.stdout | str trim)
+    let prov_root = ($sandbox | path join "provenance-root")
+    import-state-source $prov_root $bundle_out [personal] | ignore
+    # A commit made after import must not disable provenance-based merging.
+    "post-import change\n" | save ($prov_root | path join "post-import.txt")
+    run-command git ["-C" ($prov_root | into string) "add" "--all"] --quiet | ignore
+    run-command git ["-C" ($prov_root | into string) "commit" "-m" "post-import change"] --quiet | ignore
+    advance-origin $sandbox "provenance-rival" $origin12 "remote-only\n"
+    let prov_merge = (repo-sync $prov_root $cfg --remote-url=($origin12 | into string) --yes)
+    assert eq $prov_merge.status "merged" "provenance-based merging preserves both histories"
+    assert (($prov_root | path join "rival.txt") | path exists) "remote-only changes survive the provenance merge"
+    assert (($prov_root | path join "recovered.txt") | path exists) "recovered snapshot changes survive the provenance merge"
+    assert (($prov_root | path join "post-import.txt") | path exists) "post-import commits survive the provenance merge"
+    let prov_parents = (run-command git ["-C" ($prov_root | into string) "log" "-1" "--format=%P"] --quiet --capture)
+    assert (($prov_parents.stdout | str trim | split row " " | length) == 2) "the provenance merge is a real merge commit"
+
+    # Unknown-base snapshot preservation: a raw snapshot with no provenance
+    # merges only after the complete recovered difference is exposed.
+    let origin13 = (make-state-origin $sandbox "unknownbase" $state_root)
+    let raw_src = ($sandbox | path join "raw-source")
+    mkdir $raw_src
+    for entry in (ls --all $state_root) { cp --recursive $entry.name ($raw_src | path join ($entry.name | path basename)) }
+    "recovered file\n" | save ($raw_src | path join "recovered.txt")
+    let raw_root = ($sandbox | path join "raw-root")
+    import-state-source $raw_root $raw_src [personal] | ignore
+    advance-origin $sandbox "unknownbase-rival" $origin13 "remote-only\n"
+    let unknown = (repo-sync $raw_root $cfg --remote-url=($origin13 | into string) --yes)
+    assert eq $unknown.status "merged" "an unknown-base snapshot merges after review"
+    assert (($raw_root | path join "recovered.txt") | path exists) "the recovered snapshot survives the unknown-base merge"
+    assert (($raw_root | path join "rival.txt") | path exists) "the remote baseline survives the unknown-base merge"
+  }
+}
+
+# End-to-end local-remote scenario: a downloaded snapshot imports into the
+# local root, recovery changes and remote-only changes both survive, a sync
+# commit/push synchronizes the remote, and the supplied source stays
+# byte-for-byte unchanged.
+def test-e2e-local-remote [state_root: path] {
+  if not (command-exists git) { return }
+  let cfg = (test-git-config)
+  with-temp-dir "reseed-e2e.XXXXXXXX" {|sandbox|
+    let origin = (make-state-origin $sandbox "remote" $state_root)
+    let bundled = (sync-clone $sandbox "bundled" $origin)
+    run-command git ["-C" ($bundled | into string) "remote" "remove" "origin"] --quiet | ignore
+    let bundled_head = (run-command git ["-C" ($bundled | into string) "rev-parse" "HEAD"] --quiet --capture)
+    let source = ($sandbox | path join "downloaded-state.tar.gz")
+    make-state-bundle $bundled $source ($bundled_head.stdout | str trim)
+
+    # Hash every file of the supplied source before anything touches it.
+    let before = (run-command tar ["-tvf" ($source | into string)] --quiet --capture).stdout
+
+    let local = ($sandbox | path join ".local")
+    let imported = (import-state-source $local $source [personal])
+    assert eq $imported.status "imported" "the downloaded snapshot imports into .local"
+
+    # A recovery change lands only in the local state root.
+    "recovered note\n" | save ($local | path join "recovered.txt")
+
+    # The remote gains a remote-only change meanwhile.
+    advance-origin $sandbox "e2e-rival" $origin "remote-only\n"
+
+    # Sync commits the recovery change, merges the remote-only change, and
+    # pushes: both survive on the local side and the remote catches up.
+    let synced = (repo-sync $local $cfg --remote-url=($origin | into string) --commit --push --yes)
+    assert eq $synced.status "pushed" "e2e sync commits, merges, and pushes"
+    assert (($local | path join "recovered.txt") | path exists) "the recovery change survives"
+    assert (($local | path join "rival.txt") | path exists) "the remote-only change survives"
+    let remote_local = (sync-clone $sandbox "verify" $origin)
+    assert (($remote_local | path join "recovered.txt") | path exists) "the pushed recovery change reached the remote"
+    assert (($remote_local | path join "rival.txt") | path exists) "the remote keeps its own change"
+
+    # The supplied source remains byte-for-byte unchanged.
+    let after = (run-command tar ["-tvf" ($source | into string)] --quiet --capture).stdout
+    assert eq $after $before "the supplied state source remains byte-for-byte unchanged"
+  }
+}
+
 def main [] {
   let engine_root = ($env.FILE_PWD | path dirname)
   let state_root = ($engine_root | path join "templates" "state")
 
-  test-config-layer $state_root
-  test-manager-entries $engine_root $state_root
-  test-bootstrap-contract
-  test-bootstrap-updates
-  test-cargo-binstall $engine_root $state_root
-  test-winget-manifests $engine_root $state_root
-  test-brewfile-manifests $engine_root $state_root
-  test-homebrew-env $state_root
-  test-homebrew-shell-snippets $state_root
-  test-workflow-plan $state_root
-  test-secret-guard $engine_root
-  test-tooling-observations $engine_root $state_root
-  test-mise-commands $state_root
-  test-shell-generation $engine_root $state_root
-  test-mise-backends $engine_root $state_root
-  test-spec-parsing
-  test-manifest-validation $engine_root $state_root
-  test-inventory-parsing
-  test-missing-packages
-  test-mise-config-validation $state_root
-  test-checkpoints $engine_root $state_root
-  test-sync-engine-files $engine_root $state_root
-  test-shell-generator-preflight $engine_root $state_root
-  test-git-sync
-  test-init-adopt $engine_root
-  test-init-reseeds-incomplete-seed $engine_root
+  # Isolate the temporary Git repositories from the host's global signing
+  # configuration (GIT_CONFIG_GLOBAL and system config), so the behavior tests
+  # do not fail on a machine that enables GPG commit signing globally.
+  with-temp-dir "reseed-gitconfig.XXXXXXXX" {|sandbox|
+    let global_cfg = ($sandbox | path join "empty-gitconfig")
+    "" | save $global_cfg
+    with-env {GIT_CONFIG_GLOBAL: ($global_cfg | into string) GIT_CONFIG_NOSYSTEM: "1"} {
+      # Fast, mostly CPU-only tests run first (sequentially).
+      test-config-layer $state_root
+      test-manager-entries $engine_root $state_root
+      test-bootstrap-contract
+      test-bootstrap-updates
+      test-cargo-binstall $engine_root $state_root
+      test-winget-manifests $engine_root $state_root
+      test-brewfile-manifests $engine_root $state_root
+      test-homebrew-env $state_root
+      test-homebrew-shell-snippets $state_root
+      test-workflow-plan $state_root
+      test-tooling-observations $engine_root $state_root
+      test-mise-commands $state_root
+      test-shell-generation $engine_root $state_root
+      test-mise-backends $engine_root $state_root
+      test-spec-parsing
+      test-manifest-validation $engine_root $state_root
+      test-inventory-parsing
+      test-missing-packages
+      test-mise-config-validation $state_root
+      test-checkpoints $engine_root $state_root
+      test-sync-engine-files $engine_root $state_root
+      test-shell-generator-preflight $engine_root $state_root
+      test-recommendations $engine_root
+      test-status-facts-robust
+      test-cli-robustness $engine_root
+
+      # The repository-heavy tests are independent (each builds its own
+      # disposable repositories), so they run concurrently.
+      let heavy = [
+        {|| test-secret-guard $engine_root }
+        {|| test-git-sync }
+        {|| test-init-adopt $engine_root }
+        {|| test-init-reseeds-incomplete-seed $engine_root }
+        {|| test-import $engine_root $state_root }
+        {|| test-repo-sync $engine_root $state_root }
+        {|| test-git-url-attachment $state_root }
+        {|| test-e2e-local-remote $state_root }
+      ]
+      $heavy | par-each --threads 3 {|run| do $run } | ignore
+    }
+  }
 
   print "All Reseed tests passed"
 }

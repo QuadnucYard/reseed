@@ -15,7 +15,13 @@
 .PARAMETER StateRepository
     Private state repository URL; cloned when the state root is uninitialized,
     and used to refresh (fast-forward) an already-initialized state root before
-    restore.
+    restore. Mutually exclusive with StateSource.
+
+.PARAMETER StateSource
+    Immutable downloaded private-state source (a Git checkout, bundle archive,
+    or raw snapshot). When given, the source is imported into the state root
+    and restore runs from the recovered state instead of a repository.
+    Mutually exclusive with StateRepository.
 
 .PARAMETER StateRoot
     Private state root; defaults to RESEED_STATE_ROOT or ~\.local\share\reseed.
@@ -45,6 +51,7 @@
 param(
     [Alias("Repository")]
     [string]$StateRepository,
+    [string]$StateSource,
     [string]$StateRoot,
     [string]$Profiles = "personal",
     [ValidateSet("user", "machine")]
@@ -61,6 +68,9 @@ Set-StrictMode -Version 2.0
 
 if ($UpdateTools -and $NoUpdateTools) {
     throw "-UpdateTools and -NoUpdateTools are mutually exclusive."
+}
+if (-not [string]::IsNullOrWhiteSpace($StateSource) -and -not [string]::IsNullOrWhiteSpace($StateRepository)) {
+    throw "-StateSource and -StateRepository are mutually exclusive."
 }
 
 <#
@@ -337,12 +347,13 @@ function Add-PortableToolsPath {
     Make sure every tool of the bootstrap contract is available.
 .DESCRIPTION
     In offline mode the tools must already exist (portable or on PATH).
-    Otherwise they are installed through WinGet.
+    Otherwise they are installed through WinGet. A -StateSource path is local
+    and compatible with offline recovery; only -StateRepository is rejected.
 #>
 function Ensure-BootstrapTools {
     if ($Offline) {
         if (-not [string]::IsNullOrWhiteSpace($StateRepository)) {
-            throw "-Offline cannot be combined with -StateRepository. Use an extracted bundle state directory."
+            throw "-Offline cannot be combined with -StateRepository. Use an extracted bundle state directory or -StateSource."
         }
         foreach ($command in @("git.exe", "chezmoi.exe", "nu.exe")) {
             if (-not (Test-Command $command)) {
@@ -414,9 +425,10 @@ function Sync-StateRepository {
     Clone the private state repository when the state root is uninitialized.
 .DESCRIPTION
     Refuses a nonempty directory without the .reseed-state sentinel, reads the
-    remote before cloning so a wrong URL fails early, and only clones when the
-    remote has a main branch. An already-initialized root is instead synced
-    from the provided repository so a stale local copy repairs itself.
+    remote before cloning so a wrong URL fails early, and clones the remote's
+    default branch (from its symbolic HEAD) rather than assuming main. An
+    already-initialized root is instead synced from the provided repository so
+    a stale local copy repairs itself.
 #>
 function Initialize-StateRepository {
     param(
@@ -436,18 +448,22 @@ function Initialize-StateRepository {
             throw "Refusing nonempty state directory without .reseed-state: $Root"
         }
     }
-    $refs = @(& git.exe ls-remote $Repository 2>$null)
+    $sym = @(& git.exe ls-remote --symref $Repository HEAD 2>$null)
     if ($LASTEXITCODE -ne 0) {
         throw "Cannot read the private state repository: $(Format-RedactedUrl $Repository)"
     }
-    $mainRef = @($refs | Where-Object { $_ -match "refs/heads/main$" })
-    if ($mainRef.Count -gt 0) {
+    $defaultBranch = ($sym | Where-Object { $_ -match '^ref:' } | ForEach-Object {
+        ($_ -replace '^ref: refs/heads/(\S+).*', '$1')
+    } | Where-Object { $_ } | Select-Object -First 1)
+    if ([string]::IsNullOrWhiteSpace($defaultBranch)) { $defaultBranch = "main" }
+    $hasRef = @($sym | Where-Object { $_ -match "refs/heads/$defaultBranch$" })
+    if ($hasRef.Count -gt 0) {
         Write-Step "cloning private state"
-        & git.exe clone --branch main --single-branch $Repository $Root
+        & git.exe clone --branch $defaultBranch --single-branch $Repository $Root
         if ($LASTEXITCODE -ne 0) { throw "Failed to clone private state (exit $LASTEXITCODE)." }
     }
-    elseif ($refs.Count -gt 0) {
-        throw "The private state repository has content but no main branch."
+    elseif ($sym.Count -gt 0) {
+        throw "The private state repository has content but no $defaultBranch branch."
     }
 }
 
@@ -480,11 +496,16 @@ function Initialize-PrivateState {
 <#
 .SYNOPSIS
     Run the restore (or report how to plan it) once the state is ready.
+.DESCRIPTION
+    When -StateSource was given, the restore command receives --state-source so
+    the downloaded source is validated and imported atomically before the
+    recovery plan runs.
 #>
 function Invoke-Restore {
     param(
         [string]$Entrypoint,
-        [string]$Root
+        [string]$Root,
+        [string]$StateSource = ""
     )
     Write-Step "engine: $PSScriptRoot"
     Write-Step "private state: $Root"
@@ -493,6 +514,9 @@ function Invoke-Restore {
         return
     }
     $arguments = @($entrypoint, "restore", "--state-root", $Root, "--profiles", $Profiles)
+    if (-not [string]::IsNullOrWhiteSpace($StateSource)) {
+        $arguments += @("--state-source", $StateSource)
+    }
     if ($DryRun) { $arguments += "--dry-run" }
     if ($Offline) { $arguments += "--skip-software" }
     & nu.exe @arguments
@@ -505,6 +529,11 @@ Add-PortableToolsPath
 Ensure-BootstrapTools
 $engineRoot = Assert-EngineRoot
 $resolvedRoot = Resolve-StateRoot
-Initialize-StateRepository -Entrypoint (Join-Path $engineRoot "reseed.nu") -Root $resolvedRoot -Repository $StateRepository
-Initialize-PrivateState -Entrypoint (Join-Path $engineRoot "reseed.nu") -Root $resolvedRoot -Repository $StateRepository
-Invoke-Restore -Entrypoint (Join-Path $engineRoot "reseed.nu") -Root $resolvedRoot
+if (-not [string]::IsNullOrWhiteSpace($StateSource)) {
+    # A downloaded source drives recovery directly: import it and restore.
+    Invoke-Restore -Entrypoint (Join-Path $engineRoot "reseed.nu") -Root $resolvedRoot -StateSource $StateSource
+} else {
+    Initialize-StateRepository -Entrypoint (Join-Path $engineRoot "reseed.nu") -Root $resolvedRoot -Repository $StateRepository
+    Initialize-PrivateState -Entrypoint (Join-Path $engineRoot "reseed.nu") -Root $resolvedRoot -Repository $StateRepository
+    Invoke-Restore -Entrypoint (Join-Path $engineRoot "reseed.nu") -Root $resolvedRoot
+}

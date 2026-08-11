@@ -10,8 +10,15 @@ Dependency direction runs from low-level utilities up to orchestration:
 core → managed_tools → manager_core → mise → config → git → state → workflow
 ```
 
+`repo.nu` is the private repository state machine (probe, sync, merge
+continue/abort, conservative refresh) shared by status, sync, the bootstraps,
+and update; `import.nu` validates and atomically imports downloaded state
+sources; `advice.nu` is the pure prioritized recommendation layer rendered by
+status and reused after sync. `git.nu` keeps the bundle builder and the
+configuration-aware commit/pull/init helpers.
+
 `setup.nu` is a separate facade for the guided setup wizard (identity, SSH
 keys, GitHub uploads, and GPG signing); the implementation lives in the
-`setup/` submodules (plan, shared, common, ssh, gpg), which import only
-`core.nu`, and the facade is called directly from `reseed.nu`, outside the
+`setup/` submodules (plan, shared, common, provider, ssh, gpg), which import
+only `core.nu`, and the facade is called directly from `reseed.nu`, outside the
 recovery workflows.

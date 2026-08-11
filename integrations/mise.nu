@@ -8,7 +8,7 @@ export def mise-status [
   root: path # Private state root.
   config: record # Loaded configuration.
 ]: nothing -> record {
-  let settings = $config.software.mise
+  let settings = (($config.software? | default {}).mise? | default {})
   let configs = ($settings.configs? | default [])
   {
     tool: mise
@@ -26,7 +26,7 @@ export def mise-install-plan [
   root: path # Private state root.
   config: record # Loaded configuration.
 ]: nothing -> list<record> {
-  let settings = $config.software.mise
+  let settings = (($config.software? | default {}).mise? | default {})
   mut commands = []
   for relative in ($settings.configs? | default []) {
     let path = ($root | path join $relative)
@@ -101,7 +101,7 @@ export def mise-restore [
   config: record # Loaded configuration.
   --dry-run # Show the installs without running them.
 ]: nothing -> int {
-  let settings = $config.software.mise
+  let settings = (($config.software? | default {}).mise? | default {})
   if not ($settings.enabled? | default false) { return 0 }
   if not (command-exists mise) and not $dry_run { error make {msg: "mise is required for the portable tools stage"} }
   mut failures = 0
@@ -138,7 +138,7 @@ export def mise-configure-shells [
   config: record # Loaded configuration.
   --dry-run # Show generation without changing the home directory.
 ] {
-  let settings = $config.software.mise
+  let settings = (($config.software? | default {}).mise? | default {})
   if not ($settings.enabled? | default false) { return }
   let task = (mise-shell-task $settings)
   if ($task | str trim | is-empty) { return }
@@ -168,7 +168,7 @@ export def mise-update [
   config: record # Loaded configuration.
   --dry-run # Show the upgrades without running them.
 ]: nothing -> int {
-  let settings = $config.software.mise
+  let settings = (($config.software? | default {}).mise? | default {})
   if not ($settings.enabled? | default false) or not ($settings.update? | default true) { return 0 }
   if not (command-exists mise) and not $dry_run { warning "mise is unavailable; skipping portable tool updates"; return 0 }
   mut failures = 0
@@ -193,7 +193,7 @@ export def mise-reconcile [
   config: record # Loaded configuration.
   --dry-run # Skip live inventories.
 ]: nothing -> list<record> {
-  let settings = $config.software.mise
+  let settings = (($config.software? | default {}).mise? | default {})
   if not ($settings.enabled? | default false) { return [] }
   if not (command-exists mise) and not $dry_run { return [{tool: mise error: "mise is unavailable"}] }
   mut results = []
@@ -224,7 +224,7 @@ export def mise-verify [
   root: path # Private state root.
   config: record # Loaded configuration.
 ]: nothing -> list<record> {
-  let settings = $config.software.mise
+  let settings = (($config.software? | default {}).mise? | default {})
   if not ($settings.enabled? | default false) { return [] }
   mut results = [{check: "mise executable" ok: (command-exists mise) detail: "portable tool manager"}]
   for relative in ($settings.configs? | default []) {

@@ -198,7 +198,7 @@ export def homebrew-status [
   root: path # Private state root.
   config: record # Loaded configuration.
 ]: nothing -> record {
-  let settings = $config.software.homebrew
+  let settings = (($config.software? | default {}).homebrew? | default {})
   let manifests = ($settings.manifests? | default [])
   {
     tool: homebrew
@@ -229,7 +229,7 @@ export def homebrew-restore [
   config: record # Loaded configuration.
   --dry-run # Show the installs without running them.
 ]: nothing -> int {
-  let settings = $config.software.homebrew
+  let settings = (($config.software? | default {}).homebrew? | default {})
   if not ($settings.enabled? | default false) or ((detect-os) != "macos") { return 0 }
   if not (command-exists brew) and not $dry_run { error make {msg: "Homebrew is required for the macOS package stage"} }
   let environment = (homebrew-env $settings)
@@ -252,7 +252,7 @@ export def homebrew-update [
   config: record # Loaded configuration.
   --dry-run # Show the updates without running them.
 ]: nothing -> int {
-  let settings = $config.software.homebrew
+  let settings = (($config.software? | default {}).homebrew? | default {})
   if not ($settings.enabled? | default false) or not ($settings.update? | default true) or ((detect-os) != "macos") { return 0 }
   if not (command-exists brew) { warning "Homebrew is unavailable; skipping macOS package updates"; return 0 }
   let environment = (homebrew-env $settings)
@@ -383,7 +383,7 @@ export def homebrew-backup [
   --refresh-manifests # Replace the curated Brewfile with the live dump.
   --dry-run # Show the dump without running it.
 ] {
-  let settings = $config.software.homebrew
+  let settings = (($config.software? | default {}).homebrew? | default {})
   if not ($settings.enabled? | default false) or ((detect-os) != "macos") or not (command-exists brew) { return }
   let refresh = $refresh_manifests or ($settings.export_on_backup? | default false)
   let target = if $refresh and (($settings.manifests? | default [] | length) == 1) {
@@ -402,7 +402,7 @@ export def homebrew-reconcile [
   config: record # Loaded configuration.
   --dry-run # Skip the live dump.
 ]: nothing -> record {
-  let settings = $config.software.homebrew
+  let settings = (($config.software? | default {}).homebrew? | default {})
   if not ($settings.enabled? | default false) or ((detect-os) != "macos") {
     return {tool: homebrew applicable: false desired_only: [] observed_only: []}
   }
@@ -430,7 +430,7 @@ export def homebrew-verify [
   root: path # Private state root.
   config: record # Loaded configuration.
 ]: nothing -> list<record> {
-  let settings = $config.software.homebrew
+  let settings = (($config.software? | default {}).homebrew? | default {})
   if not ($settings.enabled? | default false) or ((detect-os) != "macos") { return [] }
   mut results = [{check: "homebrew executable" ok: (command-exists brew) detail: "required on macOS"}]
   for manifest in ($settings.manifests? | default []) {

@@ -24,6 +24,36 @@ def test-setup-plans [] {
   assert eq ($expected_all | where {|step| $step == ssh-key } | length) 1 "shared steps appear once"
 }
 
+# The gh purpose is routed by provider and transport: GitHub URLs use the gh
+# CLI (SSH: key generation/upload; HTTPS: auth, credential helper, probe),
+# while other Git hosts skip gh and run the generic transport check.
+def test-setup-gh-protocol-plans [] {
+  assert eq (setup-plan gh --repo-url "git@github.com:org/state.git" | get step) [jj-prereq identity gh-auth ssh-key ssh-github] "github SSH URLs use the SSH key flow"
+  assert eq (setup-plan gh --repo-url "ssh://git@github.com/org/state.git" | get step) [jj-prereq identity gh-auth ssh-key ssh-github] "ssh:// URLs use the SSH key flow"
+  assert eq (setup-plan gh --repo-url "https://github.com/org/state.git" | get step) [jj-prereq identity gh-auth gh-credential-helper gh-repo-probe] "github HTTPS URLs drive gh auth and credential-helper setup"
+  assert eq (setup-plan gh --repo-url "git@gitlab.com:org/state.git" | get step) [jj-prereq identity ssh-key gh-repo-probe] "gitlab SSH URLs skip gh and probe generically"
+  assert eq (setup-plan gh --repo-url "https://evilgithub.com/org/state.git" | get step) [jj-prereq identity gh-repo-probe] "a lookalike github.com host is never treated as GitHub"
+  assert eq (setup-plan gh --repo-url "https://gitlab.com.example.com/org/state.git" | get step) [jj-prereq identity gh-repo-probe] "a suffixed gitlab.com host is never treated as GitLab"
+  assert eq (setup-plan gh --repo-url "https://gitlab.com/org/state.git" | get step) [jj-prereq identity gh-repo-probe] "gitlab HTTPS URLs skip gh entirely"
+  assert eq (setup-plan gh --repo-url "https://git.example.com/org/state.git" | get step) [jj-prereq identity gh-repo-probe] "generic HTTPS hosts skip gh entirely"
+  assert eq (setup-plan gh --repo-url "git@git.example.com:org/state.git" | get step) [jj-prereq identity ssh-key gh-repo-probe] "generic SSH hosts generate a key and probe"
+  assert eq (setup-plan gh --repo-url "" | get step) [jj-prereq identity gh-auth ssh-key ssh-github] "gh without a repository URL keeps the default flow"
+
+  # The all and gpg purposes are provider-aware too: a default setup on a
+  # non-GitHub host never authenticates with or uploads to GitHub.
+  let gitlab_all = (setup-plan all --repo-url "https://gitlab.com/org/state.git" | get step)
+  assert ($gitlab_all | where {|step| $step in [gh-auth ssh-github gpg-github gh-credential-helper] } | is-empty) "all on GitLab skips GitHub uploads"
+  assert ("gh-repo-probe" in $gitlab_all) "all on GitLab probes the repository generically"
+  let generic_all = (setup-plan all --repo-url "git@git.example.com:org/state.git" | get step)
+  assert ($generic_all | where {|step| $step in [gh-auth ssh-github gpg-github] } | is-empty) "all on a generic host skips GitHub uploads"
+  let gitlab_gpg = (setup-plan gpg --repo-url "https://gitlab.com/org/state.git" | get step)
+  assert ("gpg-github" not-in $gitlab_gpg) "gpg on GitLab skips the GitHub GPG upload"
+  let github_all = (setup-plan all --repo-url "https://github.com/org/state.git" | get step)
+  assert (("gh-auth" in $github_all) and ("gh-credential-helper" in $github_all) and ("gpg-github" in $github_all)) "all on GitHub HTTPS keeps gh auth, the credential helper, and the GPG upload"
+  let github_ssh_all = (setup-plan all --repo-url "git@github.com:org/state.git" | get step)
+  assert ("ssh-github" in $github_ssh_all) "all on GitHub SSH keeps the key upload"
+}
+
 # Feature gating: disabling jj or GPG removes the gated steps from every
 # purpose, keeping the remaining order stable.
 def test-setup-feature-gating [] {
@@ -109,6 +139,7 @@ def test-jj-signing-behaviors [] {
 
 def main [] {
   test-setup-plans
+  test-setup-gh-protocol-plans
   test-setup-feature-gating
   test-gh-scope-parsing
   test-gpg-colons-parsing

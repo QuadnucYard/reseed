@@ -3,6 +3,7 @@
 
 use ../core.nu [command-exists fail]
 use ./shared.nu [ask-default-yes]
+use ./provider.nu [parse-repo-url provider-descriptor]
 
 # Ordered step metadata: dependency closure drives the plan, features gate
 # the optional areas (gpg, jj), and definition order is the stable run order.
@@ -17,6 +18,8 @@ def setup-step-defs []: nothing -> list<record> {
     {step: ssh-hosts depends_on: [ssh-key] features: []}
     {step: ssh-config depends_on: [ssh-hosts] features: []}
     {step: ssh-test depends_on: [ssh-hosts] features: []}
+    {step: gh-credential-helper depends_on: [gh-auth] features: []}
+    {step: gh-repo-probe depends_on: [identity] features: []}
     {step: gpg-prereq depends_on: [] features: [gpg]}
     {step: gpg-key depends_on: [identity gpg-prereq] features: [gpg]}
     {step: gpg-github depends_on: [gh-auth gpg-key] features: [gpg]}
@@ -26,17 +29,57 @@ def setup-step-defs []: nothing -> list<record> {
   ]
 }
 
+# Whether the repository belongs to the GitHub provider (the gh CLI owns its
+# uploads). An empty URL keeps the legacy GitHub default.
+def gh-cli-provider? [repo_url: string]: nothing -> bool {
+  if ($repo_url | str trim | is-empty) { return true }
+  (provider-descriptor (parse-repo-url $repo_url).provider).gh_cli
+}
+
+# The GPG signing steps for a repository: the GitHub GPG-key upload only makes
+# sense for GitHub repositories.
+def gpg-steps [repo_url: string]: nothing -> list<string> {
+  if (gh-cli-provider? $repo_url) {
+    [gpg-prereq gpg-key gpg-github gpg-git gpg-jj gpg-verify]
+  } else {
+    [gpg-prereq gpg-key gpg-git gpg-jj gpg-verify]
+  }
+}
+
+# The all purpose: the union of the provider-aware gh subplan, the generic SSH
+# host steps, and the GPG steps. GitHub-specific upload steps (gh auth, GitHub
+# key uploads) only appear for GitHub repositories, so a default `reseed setup`
+# never authenticates with or uploads to GitHub for a GitLab or generic host.
+def all-purpose-steps [repo_url: string]: nothing -> list<string> {
+  ((gh-purpose-steps $repo_url) | append [ssh-key ssh-agent ssh-hosts ssh-config ssh-test] | append (gpg-steps $repo_url) | uniq)
+}
+
 # Steps each purpose selects; missing dependencies are added automatically.
-def setup-purpose-steps [purpose: string]: nothing -> list<string> {
+def setup-purpose-steps [purpose: string, repo_url: string]: nothing -> list<string> {
   match $purpose {
     identity => [identity]
     ssh-local => [identity ssh-key ssh-agent]
     ssh-remote => [identity ssh-key ssh-hosts ssh-config]
     ssh => [identity ssh-key ssh-agent ssh-hosts ssh-config ssh-test]
-    gh => [identity gh-auth ssh-key ssh-github]
-    gpg => [identity gpg-prereq gpg-key gpg-github gpg-git gpg-jj gpg-verify]
-    all => (setup-step-defs | get step)
+    gh => (gh-purpose-steps $repo_url)
+    gpg => ([identity] | append (gpg-steps $repo_url))
+    all => (all-purpose-steps $repo_url)
     _ => (fail $"Unknown setup purpose: ($purpose)")
+  }
+}
+
+# The gh purpose steps for a repository URL, routed by provider and transport
+# through the data-driven provider descriptors. GitHub URLs use the gh CLI
+# (auth, key upload, credential helper, probing); other Git hosts skip gh and
+# run the generic transport check.
+def gh-purpose-steps [repo_url: string]: nothing -> list<string> {
+  if ($repo_url | str trim | is-empty) { return [identity gh-auth ssh-key ssh-github] }
+  let parsed = (parse-repo-url $repo_url)
+  let descriptor = (provider-descriptor $parsed.provider)
+  if $descriptor.gh_cli {
+    if $parsed.transport == "ssh" { [identity gh-auth ssh-key ssh-github] } else { [identity gh-auth gh-credential-helper gh-repo-probe] }
+  } else {
+    if $parsed.transport == "ssh" { [identity ssh-key gh-repo-probe] } else { [identity gh-repo-probe] }
   }
 }
 
@@ -77,9 +120,10 @@ export def setup-plan [
   purpose: string # Setup purpose: identity, ssh, ssh-local, ssh-remote, gh, gpg, or all.
   --jj = true # Include jj-dependent steps.
   --gpg = true # Include GPG signing steps.
+  --repo-url: string = "" # Private state repository URL; makes the gh purpose protocol-aware.
 ]: nothing -> list<record> {
   let defs = (setup-step-defs)
-  (step-order (step-closure (setup-purpose-steps $purpose)))
+  (step-order (step-closure (setup-purpose-steps $purpose $repo_url)))
     | each {|name| $defs | where step == $name | first }
     | where {|d| ($d.features | all {|feature| if $feature == gpg { $gpg } else if $feature == jj { $jj } else { true } }) }
     | enumerate

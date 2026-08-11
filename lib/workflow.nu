@@ -2,13 +2,16 @@
 # reseed workflows: init, plan, status, restore, backup, update, reconcile,
 # verify, and bundle.
 
-use core.nu [command-exists confirm detect-os fail info run-command state-sentinel-exists warning]
+use core.nu [command-exists confirm detect-os fail info run-command scrub-url state-sentinel-exists warning]
 use config.nu [config-fingerprint load-config validate-config]
-use state.nu [complete-stage fail-stage load-checkpoint stage-done]
+use state.nu [checkpoint-path complete-stage fail-stage load-checkpoint stage-done]
+use repo.nu [repo-merge-abort repo-merge-continue repo-probe repo-sync]
+use import.nu [import-state-source]
+use advice.nu [recommend]
 use git.nu [git-bundle git-commit git-init git-pull git-status git-sync]
 use secrets.nu [commit-change-summary scan-commit-secrets]
 use ../integrations/chezmoi.nu [chezmoi-backup chezmoi-restore chezmoi-status chezmoi-verify]
-use ../integrations/bootstrap.nu [bootstrap-outdated bootstrap-status bootstrap-verify]
+use ../integrations/bootstrap.nu [bootstrap-outdated bootstrap-status bootstrap-tools bootstrap-verify]
 use ../integrations/finder.nu [finder-backup finder-enabled finder-reconcile finder-restore finder-status finder-verify]
 use ../integrations/homebrew.nu [homebrew-backup homebrew-persist-env homebrew-reconcile homebrew-restore homebrew-status homebrew-update homebrew-verify]
 use ../integrations/kopia.nu [kopia-backup kopia-restore kopia-status kopia-verify]
@@ -149,6 +152,20 @@ export def sync-engine-files [
   }
 }
 
+# Prepare the local state before any command that needs a valid configuration:
+# seed the template into a missing root and heal an incomplete uncommitted
+# seed, then copy any missing engine-owned files. This is the preparation stage
+# that lets restore, update, setup, and the bootstraps run even when the
+# private repository is unreachable or a seed lost a file.
+export def prepare-state [
+  engine_root: path # Engine directory providing the template.
+  state_root: path # Private state root.
+  --dry-run # Report the preparation without writing.
+] {
+  ensure-state-root $engine_root $state_root --dry-run=$dry_run
+  sync-engine-files $engine_root $state_root --dry-run=$dry_run
+}
+
 # Create or validate the private state repository and initialize Git.
 export def workflow-init [
   engine_root: path # Engine directory.
@@ -157,8 +174,7 @@ export def workflow-init [
   --remote-url: string # Private Git remote URL to configure as origin.
   --dry-run # Show what would be initialized without writing files.
 ] {
-  ensure-state-root $engine_root $state_root --dry-run=$dry_run
-  sync-engine-files $engine_root $state_root --dry-run=$dry_run
+  prepare-state $engine_root $state_root --dry-run=$dry_run
   let config_root = if (state-sentinel-exists $state_root) { $state_root } else { state-template $engine_root }
   let config = (load-config $config_root $profiles)
   check-config $config_root $config
@@ -209,15 +225,89 @@ def warn-bootstrap-outdated [
   info "Upgrade them by rerunning the platform bootstrap with --update-tools"
 }
 
-# Report integration availability, private repository state, and desired-state
-# file health as tables.
+# True when a completed restore checkpoint matches the current desired-state
+# fingerprint: the machine has been restored to the current desired state. The
+# final verification stage only completes at the end of a restore.
+def restore-complete? [
+  engine_root: path # Engine directory (fingerprint scope).
+  root: path # Private state root.
+  config: record # Loaded configuration; may be empty when unloadable.
+]: nothing -> bool {
+  if ($config | is-empty) { return false }
+  let fingerprint = (config-fingerprint $root $config --engine-root=$engine_root)
+  let path = (checkpoint-path $config)
+  if not ($path | path exists) { return false }
+  let checkpoint = (try { open $path } catch { return false })
+  (($checkpoint.fingerprint? | default "") == $fingerprint)
+    and (($checkpoint.failed? | default null) == null)
+    and ("verification" in ($checkpoint.completed? | default []))
+}
+
+# Machine readable status facts: the repository state machine plus
+# configuration validity and whether the machine was restored to the current
+# fingerprint. Remains usable with a missing root, missing Git, malformed
+# configuration, failed authentication, or an interrupted merge.
+export def workflow-status-facts [
+  engine_root: path # Engine directory.
+  root: path # Private state root.
+  config: record # Loaded configuration (possibly empty or invalid).
+  --offline # Use local and cached remote facts instead of probing.
+]: nothing -> record {
+  let issues = (if ($config | is-empty) {
+    [{level: error area: config message: "configuration could not be loaded"}]
+  } else {
+    (try { validate-config $root $config } catch { [{level: error area: config message: "configuration could not be loaded"}] })
+  })
+  let errors = ($issues | where level == error)
+  let facts = (repo-probe $root $config --offline=$offline --read-only=(not $offline))
+  $facts
+    | merge {config_ok: ($errors | is-empty) config_issues: $issues restored: (restore-complete? $engine_root $root $config)}
+}
+
+# Print the prioritized recommendations for a set of status facts.
+def print-recommendations [
+  facts: record # Status facts.
+  context: record # Engine root, profiles, and known remote URL.
+] {
+  let recommendations = (recommend $facts $context)
+  if ($recommendations | is-empty) { return }
+  info "recommendations:"
+  for entry in $recommendations {
+    if ($entry.commands | is-empty) {
+      info $"  - ($entry.title)"
+    } else {
+      info $"  - ($entry.title)"
+      for command in $entry.commands { print $"        ($command)" }
+    }
+  }
+}
+
+# Report integration availability, repository state, desired-state file
+# health, and the prioritized recovery recommendations.
 export def workflow-status [
+  engine_root: path # Engine directory.
   root: path # Private state root.
   config: record # Loaded configuration.
+  --offline # Do not probe the remote; use local and cached facts.
 ] {
   info $"platform: (detect-os)"
   info $"private state: ($root)"
-  info $"profiles: ($config.active_profiles | str join ', ')"
+  let profiles = ($config.active_profiles? | default [])
+  if ($profiles | is-not-empty) { info $"profiles: ($profiles | str join ', ')" }
+  let facts = (workflow-status-facts $engine_root $root $config --offline=$offline)
+  info $"repository phase: ($facts.phase)"
+  if $facts.git_available and $facts.repository {
+    let remote_line = if ($facts.remote_url | is-empty) {
+      "no remote configured"
+    } else {
+      $"remote: (scrub-url $facts.remote_url) (($facts.remote_name))"
+    }
+    info $"repository: ($remote_line)"
+    if $facts.branch != "" { info $"branch: ($facts.branch)" }
+    if $facts.remote_ahead == true {
+      info "ahead: - behind: needs fetch (the remote has advanced)"
+    } else if $facts.ahead != null { info $"ahead: ($facts.ahead) behind: ($facts.behind)" }
+  }
   let git = (git-status $root)
   let bootstrap = (bootstrap-status)
   let outdated = (bootstrap-outdated)
@@ -233,9 +323,75 @@ export def workflow-status [
     ({tool: git enabled: true applicable: true available: $git.available repository: $git.repository clean: $git.clean})
   ] | table --expand | print
 
-  let issues = (validate-config $root $config)
-  if ($issues | is-empty) { info "desired-state files are present" } else { $issues | table | print }
+  if ($facts.config_issues | is-empty) {
+    info "desired-state files are present"
+  } else {
+    $facts.config_issues | table | print
+  }
   warn-bootstrap-outdated $outdated
+  print-recommendations $facts {engine_root: $engine_root profiles: $profiles remote_url: (($config.git? | default {}).url? | default "")}
+}
+
+# Compact "what now" summary for the bare `reseed` invocation: fundamental
+# software availability, private-state initialization, configuration health,
+# whether the machine matches the current desired state, and the next
+# recommended commands. It only uses local and cached facts so it returns
+# immediately even when the remote is unreachable, and stays usable when the
+# state root is missing, Git is absent, the configuration is malformed, or a
+# merge is interrupted.
+export def workflow-summary [
+  engine_root: path # Engine directory.
+  root: path # Private state root.
+  config: record # Loaded configuration (possibly empty or invalid).
+] {
+  let facts = (workflow-status-facts $engine_root $root $config --offline)
+  info $"platform: (detect-os)"
+  info $"private state: ($facts.state_root)"
+  let profiles = ($config.active_profiles? | default [])
+  if ($profiles | is-not-empty) { info $"profiles: ($profiles | str join ', ')" }
+
+  info "fundamental software:"
+  for tool in (bootstrap-tools) {
+    let present = (command-exists $tool.command)
+    let mark = if $present {
+      $"(ansi green)✓(ansi reset)"
+    } else {
+      $"(ansi red)✗ missing(ansi reset)"
+    }
+    print $"  ($mark) ($tool.command) - ($tool.detail)"
+  }
+
+  if $facts.sentinel {
+    info $"private state: initialized (($facts.phase))"
+    if $facts.git_available and $facts.repository {
+      if ($facts.branch | is-not-empty) { info $"  branch: ($facts.branch)" }
+      let remote_line = if ($facts.remote_url | is-empty) {
+        "no remote configured"
+      } else {
+        $"remote: (scrub-url $facts.remote_url) (($facts.remote_name))"
+      }
+      info $"  ($remote_line)"
+      if $facts.ahead != null { info $"  ahead: ($facts.ahead) behind: ($facts.behind)" }
+    }
+  } else {
+    info "private state: not initialized"
+  }
+
+  let errors = ($facts.config_issues | where level == error)
+  if ($facts.config_issues | is-empty) {
+    info "configuration: valid"
+  } else if ($errors | is-empty) {
+    info "configuration: valid with warnings"
+  } else {
+    warning $"configuration: ($errors | length) errors"
+  }
+  info (if $facts.restored {
+    "machine: restored to the current desired state"
+  } else {
+    "machine: not yet restored to the current desired state"
+  })
+
+  print-recommendations $facts {engine_root: $engine_root profiles: $profiles remote_url: (($config.git? | default {}).url? | default "")}
 }
 
 # Fail when the configuration has any validation error-level issue. Advisory
@@ -299,18 +455,38 @@ def execute-stage [
 }
 
 # Restore the machine: native packages, mise tools, configuration, snapshots,
-# and verification, in dependency order with checkpoint resume support.
+# and verification, in dependency order with checkpoint resume support. With
+# --state-source a downloaded private-state source is validated, staged, and
+# imported atomically into the writable state root before the recovery plan
+# runs; dry runs validate the source and report the import and recovery
+# actions without changing anything.
 export def workflow-restore [
   engine_root: path # Engine directory (checkpoint fingerprint scope).
   root: path # Private state root.
-  config: record # Loaded configuration.
+  profiles: list<string> # Profile names to load and validate.
   --yes # Apply the recovery plan without asking for confirmation.
   --resume # Continue a matching interrupted restore.
   --dry-run # Show recovery actions without changing the machine.
   --skip-software # Skip native packages and mise-managed tools.
+  --state-source: string = "" # Immutable downloaded private-state source to import first.
 ] {
+  if ($state_source | str trim | is-not-empty) {
+    let imported = (import-state-source $root $state_source $profiles --dry-run=$dry_run)
+    if $dry_run {
+      # Validate and report the import, then preview the recovery plan computed
+      # from the source's configuration.
+      let plan = (workflow-plan $imported.config_root $imported.config --skip-software=$skip_software)
+      $plan | table | print
+      info "Dry run: the state source would be imported, then the plan above applied"
+      return
+    }
+    if $imported.status not-in [imported no-op] {
+      fail "State source import did not complete"
+    }
+  }
+  prepare-state $engine_root $root --dry-run=$dry_run
+  let config = (load-config $root $profiles)
   check-bootstrap --skip-software=$skip_software
-  sync-engine-files $engine_root $root --dry-run=$dry_run
   check-config $root $config
   let plan = (workflow-plan $root $config --skip-software=$skip_software)
   $plan | table | print
@@ -401,6 +577,38 @@ export def workflow-backup [
   info "Backup capture completed; review the source diff"
 }
 
+# Synchronize the private state repository: prepare the root, then attach,
+# fetch, fast-forward, or merge the configured remote while preserving local
+# history. --commit reviews and commits dirty state; --push publishes existing
+# or newly created commits. Recommendations are printed before an actionable
+# outcome so the next step is always visible.
+export def workflow-sync [
+  engine_root: path # Engine directory (template source and recommendation rendering).
+  root: path # Private state root.
+  profiles: list<string> # Profile names.
+  --remote-url: string = "" # Requested remote URL (existing origin wins).
+  --commit # Review and commit dirty working-tree state.
+  --push # Publish local commits.
+  --yes # Skip confirmations.
+  --dry-run
+]: nothing -> record {
+  prepare-state $engine_root $root --dry-run=$dry_run
+  let config = (try { load-config $root $profiles } catch { {} })
+  let result = (repo-sync $root $config --remote-url=$remote_url --commit=$commit --push=$push --yes=$yes --dry-run=$dry_run)
+  let facts = (repo-probe $root $config --offline)
+  let restored = (if ($config | is-empty) { false } else { restore-complete? $engine_root $root $config })
+  let config_ok = (not ($config | is-empty))
+  let context = {engine_root: $engine_root profiles: $profiles remote_url: ($remote_url | str trim)}
+  if $result.synced {
+    info ($result.detail? | default "private state synchronized")
+    print-recommendations ($facts | merge {config_ok: $config_ok restored: $restored}) $context
+  } else {
+    print-recommendations ($facts | merge {config_ok: $config_ok restored: $restored}) $context
+    if not ($result.detail? | default "" | is-empty) { warning $result.detail }
+  }
+  $result
+}
+
 # Pull the private state, update managed software, reapply dotfiles, and
 # verify the result. The configuration is reloaded after the pull so updates
 # honor the freshly pulled desired state.
@@ -413,7 +621,7 @@ export def workflow-update [
   --dry-run # Show pull and update actions without changing anything.
 ] {
   check-bootstrap
-  sync-engine-files $engine_root $root --dry-run=$dry_run
+  prepare-state $engine_root $root --dry-run=$dry_run
   check-config $root $config
   if not $dry_run and not (confirm "Pull configuration and update managed software?" --yes=$yes) { info "Update cancelled"; return }
   git-pull $root $config --dry-run=$dry_run

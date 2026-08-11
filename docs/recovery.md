@@ -1,8 +1,13 @@
 # Recovery sequence
 
-`reseed restore` validates all selected profiles, manifests, bootstrap
-prerequisites, and mise backend dependencies, prints the work it will perform,
-and asks before changing the machine. It then runs:
+`reseed restore` prepares (or imports) the private state, validates all
+selected profiles, manifests, bootstrap prerequisites, and mise backend
+dependencies, prints the work it will perform, and asks before changing the
+machine. With `--state-source <path>` a downloaded private-state source (a Git
+checkout, offline bundle, or raw snapshot) is validated, staged, and imported
+atomically into the state root first; dry runs validate the source and preview
+the plan without writing. The supplied source is immutable and is never
+initialized, seeded, updated, or assigned a remote. It then runs:
 
 1. Bootstrap preflight for Git, chezmoi, Nushell, and mise.
 2. Curated WinGet imports on Windows or Homebrew Bundle installs on macOS.
@@ -47,3 +52,28 @@ by construction; explicitly approved external payloads come only from
 one commit, and no uncommitted tracked changes. A bundle made on Windows
 contains Windows tools; create a separate bundle on macOS for Apple Silicon or
 Intel recovery.
+
+## Repository synchronization
+
+`reseed sync` keeps the private state repository in step with its remote while
+preserving local history. One state machine classifies the repository as
+missing/unborn, empty remote, clean-synchronized, behind, ahead, dirty,
+diverged, detached, shallow, inaccessible, mismatched remote, missing
+configured branch, or merge-in-progress, and both `status` and the bootstraps
+reuse it. By default sync attaches a remote, fetches, fast-forwards, or merges;
+it never commits dirty state or pushes implicitly. `--commit` prints the change
+summary, scans for secrets, confirms, and commits; `--push` publishes existing
+or newly created commits, retrying once when a push loses a remote race. On
+divergence the configured remote branch is merged while both histories are
+preserved; conflicts persist their intent outside the repository so
+`sync --continue` (after resolving) and `sync --abort` complete or discard the
+merge. An empty remote accepts the first push, but a nonempty remote that lacks
+the configured branch is refused rather than guessed.
+
+`reseed status` prints machine-readable facts (including the repository phase)
+and prioritized, copy-pasteable next commands. The ordering is fixed:
+resolve/abort conflicts, import or repair state, install prerequisites, restore
+the current fingerprint, configure repository access, then attach/commit/merge/
+push state. The same recommendations are reused after `sync` succeeds and
+before actionable failures. `status --offline` skips the bounded remote probe
+and uses only local and cached facts.

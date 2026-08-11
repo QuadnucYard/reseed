@@ -7,7 +7,7 @@ export def chezmoi-status [
 ]: nothing -> record {
   {
     tool: chezmoi
-    enabled: ($config.chezmoi.enabled? | default false)
+    enabled: (($config.chezmoi? | default {}).enabled? | default false)
     applicable: true
     available: (command-exists chezmoi)
     source: ($root | into string)

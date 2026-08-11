@@ -8,7 +8,7 @@ in a separate private state repository.
 | --- | --- | --- |
 | Reseed engine | CLI, bootstraps, integrations, tests, state template | General engine remote |
 | `~/.local/share/reseed` | Dotfiles, package manifests, profiles, mise tools | Your private Git remote |
-| `~/.local/state/reseed` | Observations and restore checkpoints | Nowhere; disposable local state |
+| `~/.local/state/reseed` | Observations, restore checkpoints, sync/import records | Nowhere; disposable local state |
 
 On this Windows machine, the private state path resolves to
 `C:\Users\dell\.local\share\reseed`. Set `RESEED_STATE_ROOT` or pass
@@ -35,13 +35,28 @@ nu reseed.nu init --remote-url <private-state-git-url>
 
 # Capture, commit, and push the private state.
 nu reseed.nu backup --commit --push
+
+# Review the repository state and get the next command.
+nu reseed.nu status
+
+# Synchronize: attach a remote, fetch, fast-forward, or merge while keeping
+# local history. --commit reviews and commits dirty state; --push publishes.
+nu reseed.nu sync
+nu reseed.nu sync --commit --push
+nu reseed.nu sync --continue   # finish an interrupted merge
+nu reseed.nu sync --abort      # discard an interrupted merge
 ```
 
 The engine never chooses a hosting provider or remote URL. It also refuses to
 replace an existing `origin` with a different URL. A state root that has local
 commits or uncommitted changes is left untouched by `init --remote-url`; use
 `reseed adopt --remote-url <url> --replace` to explicitly discard local work in
-favor of the remote state.
+favor of the remote state, or `reseed sync` to merge and publish instead.
+
+The remote URL resolution order is: the existing `origin` URL, then
+`--remote-url`, then the optional `git.url` in `config/recovery.nuon`. URLs
+stored in state are non-secret: a `git.url` embedding HTTP credentials or
+tokens is rejected.
 
 The private repository contains all desired workstation state:
 
@@ -89,8 +104,11 @@ detected Homebrew prefix, so alternate state roots work in every directory.
 These use the default private state path:
 
 ```sh
+nu reseed.nu
 nu reseed.nu plan --profiles personal
 nu reseed.nu status --profiles personal
+nu reseed.nu status --offline
+nu reseed.nu sync --profiles personal
 nu reseed.nu backup --profiles personal
 nu reseed.nu reconcile --profiles personal
 nu reseed.nu restore --profiles personal
@@ -99,9 +117,24 @@ nu reseed.nu verify --profiles personal
 nu reseed.nu bundle --output reseed-source.tar.gz
 ```
 
+Running `reseed` with no subcommand prints a compact summary of the machine:
+whether the fundamental software (Git, chezmoi, Nushell, mise) is in place,
+whether the local state is initialized, configuration health, whether the
+machine is restored to the current desired state, and the prioritized,
+copy-pasteable next commands. It uses only local and cached facts, so it
+returns immediately even when the remote is unreachable; use `reseed status`
+for the full online view with a bounded remote probe (or `status --offline` to
+skip it).
+
 Use `--dry-run` to print commands, `--yes` for unattended restore/update,
 `--resume` after an interrupted restore, and `--skip-software` for an offline
 configuration-only restore. Every command accepts `--state-root`.
+
+`status` probes the remote read-only (bounded) and prints the repository phase
+plus prioritized, copy-pasteable next commands; `status --offline` uses only
+local and cached facts. `sync` attaches a remote, fetches, fast-forwards, or
+merges while preserving both histories, and its recommendations are reused
+after every command that changes the repository.
 
 `backup` captures chezmoi changes and writes package-manager observations under
 the disposable state directory. Observations are not automatically promoted.
@@ -169,6 +202,43 @@ already initialized, the bootstrap fast-forwards it from the provided
 repository first, so a stale local copy (for example one missing a recently
 added `config/recovery.nuon`) repairs itself before restore runs.
 
+### Recover from a downloaded state source
+
+When the private repository cannot be cloned directly but a downloaded snapshot
+is available (a Git checkout, an offline bundle, or a raw snapshot directory),
+pass it as an immutable state source instead of a repository:
+
+```powershell
+.\bootstrap.ps1 -StateSource .\downloaded-state -Profiles personal
+```
+
+```sh
+./bootstrap.sh --state-source ./downloaded-state --profiles personal
+```
+
+`-StateSource`/`--state-source` is mutually exclusive with `StateRepository`.
+The source is validated (it must carry the `.reseed-state` sentinel and a valid
+selected configuration), staged, and imported atomically into the state root
+before restore runs. It is never initialized, seeded, updated, or assigned a
+remote; a rerun with the same source is a no-op and a different source against
+an already-initialized root is refused. The same flow is available directly:
+
+```sh
+nu reseed.nu restore --state-source ./downloaded-state.tar.gz
+```
+
+Git-checkout sources are cloned locally without hardlinks and their modified,
+deleted, and non-ignored untracked files are overlaid on top; bundle and raw
+snapshots copy non-ignored state files and retain any available revision
+metadata. A bundle's recorded `state_revision` is preserved as the merge base
+when the remote still contains that commit: sync rebases the recovered snapshot
+(and any commits made after the import) onto it, so the snapshot merges with
+the remote history instead of being treated as unrelated. When the remote does
+not contain `state_revision` (for example an artifact newer than the remote),
+or the snapshot has no recorded provenance, sync attaches the fetched remote as
+the baseline and exposes the complete recovered-snapshot difference for review
+before merging both histories.
+
 ### No repository yet? Bootstrap first, link later
 
 When the private repository cannot be used yet (no SSH key, no `gh` auth, no
@@ -186,7 +256,9 @@ into the existing root without re-running the whole bootstrap. It adopts a
 template seed directly and refuses to overwrite local commits or uncommitted
 changes unless you pass `--replace`. The bootstraps' `--state-repository` flag
 is the equivalent one-step path when the repository is available at bootstrap
-time. A seed that lost a file (for example an interrupted seed missing
+time. For the richer synchronization behavior (fast-forward, merge on
+divergence, reviewed commits, and push) the guidance recommends
+`reseed sync`. A seed that lost a file (for example an interrupted seed missing
 `config/recovery.nuon`) repairs itself: re-running `reseed init` re-seeds any
 missing template files into the uncommitted seed, so `reseed setup` and
 `reseed restore` can run even before the private repository is reachable.

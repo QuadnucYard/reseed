@@ -6,11 +6,11 @@ export def kopia-status [
 ]: nothing -> record {
   {
     tool: kopia
-    enabled: ($config.kopia.enabled? | default false)
+    enabled: (($config.kopia? | default {}).enabled? | default false)
     applicable: true
     available: (command-exists kopia)
-    snapshots: ($config.kopia.snapshot_paths? | default [] | length)
-    restores: ($config.kopia.restore? | default [] | length)
+    snapshots: (($config.kopia? | default {}).snapshot_paths? | default [] | length)
+    restores: (($config.kopia? | default {}).restore? | default [] | length)
   }
 }
 

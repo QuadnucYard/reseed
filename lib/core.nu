@@ -98,6 +98,83 @@ export def show-command [
   ([(printable-arg $program)] | append ($args | each {|arg| printable-arg $arg }) | str join " ")
 }
 
+# Path of the PowerShell deadline wrapper script, generated on first use.
+def windows-timeout-wrapper []: nothing -> path {
+  let temp = if not ($env.TEMP? | default "" | is-empty) {
+    $env.TEMP
+  } else if not ($env.TMPDIR? | default "" | is-empty) {
+    $env.TMPDIR
+  } else {
+    "/tmp"
+  }
+  $temp | path join "reseed-timeout.ps1"
+}
+
+# Write the PowerShell deadline wrapper used when neither GNU timeout nor perl
+# is available (Windows without Git for Windows on PATH). It starts the command
+# with a hand-quoted command line (ProcessStartInfo.ArgumentList is absent on
+# older .NET), kills it when the deadline passes, and re-emits the child's
+# stdout/stderr so run-command's capture works.
+def ensure-windows-timeout-wrapper [] {
+  let script = ([
+    "param("
+    "    [Parameter(Mandatory = \$true)]"
+    "    [int]\$TimeoutSeconds,"
+    "    [Parameter(Mandatory = \$true)]"
+    "    [string]\$Program,"
+    "    [Parameter(ValueFromRemainingArguments = \$true)]"
+    "    [string[]]\$Arguments"
+    ")"
+    "\$ErrorActionPreference = \"Stop\""
+    "\$psi = [System.Diagnostics.ProcessStartInfo]::new()"
+    "\$psi.FileName = \$Program"
+    "\$psi.UseShellExecute = \$false"
+    "\$psi.RedirectStandardOutput = \$true"
+    "\$psi.RedirectStandardError = \$true"
+    "\$argLine = ((\$Arguments | ForEach-Object { '\"' + (\$_ -replace '\"', '\\\"') + '\"' }) -join ' ')"
+    "\$psi.Arguments = \$argLine"
+    "\$process = [System.Diagnostics.Process]::new()"
+    "\$process.StartInfo = \$psi"
+    "if (-not \$process.Start()) { [Console]::Error.WriteLine(\"reseed: could not start \$Program\"); exit 127 }"
+    "\$outTask = \$process.StandardOutput.ReadToEndAsync()"
+    "\$errTask = \$process.StandardError.ReadToEndAsync()"
+    "if (-not \$process.WaitForExit((\$TimeoutSeconds * 1000))) {"
+    "    try { \$process.Kill(\$true) } catch { try { \$process.Kill() } catch {} }"
+    "    \$process.WaitForExit()"
+    "    [Console]::Error.WriteLine(\"reseed: command timed out after \${TimeoutSeconds}s\")"
+    "    exit 124"
+    "}"
+    "\$process.WaitForExit()"
+    "[Console]::Out.Write(\$outTask.Result)"
+    "[Console]::Error.Write(\$errTask.Result)"
+    "exit \$process.ExitCode"
+  ] | str join "\n")
+  let path = (windows-timeout-wrapper)
+  if not ($path | path exists) {
+    $script | save --force $path
+  }
+}
+
+# Wrap a command so it is killed after the given number of seconds. Prefers GNU
+# coreutils `timeout` (which prints a DURATION usage), then perl's alarm+exec
+# (preinstalled on macOS, shipped with Git for Windows), then a generated
+# PowerShell deadline wrapper on Windows (always available), and otherwise runs
+# unwrapped so a missing tool never blocks the caller.
+def timeout-wrapper [seconds: int, program: string, args: list<string>]: nothing -> list<string> {
+  if $seconds <= 0 { return ([$program] | append $args) }
+  let gnu = if (command-exists timeout) {
+    let probe = (try { ^timeout --help | complete } catch { {exit_code: 1 stdout: "" stderr: ""} })
+    (($probe.stdout | str contains "DURATION") or ($probe.stdout | str contains "coreutils"))
+  } else { false }
+  if $gnu { return ([timeout ($seconds | into string) $program] | append $args) }
+  if (command-exists perl) { return ([perl "-e" "alarm shift; exec @ARGV" ($seconds | into string) $program] | append $args) }
+  if (detect-os) == "windows" {
+    ensure-windows-timeout-wrapper
+    return ([powershell "-NoProfile" "-ExecutionPolicy" "Bypass" "-File" (windows-timeout-wrapper) ($seconds | into string) $program] | append $args)
+  }
+  ([$program] | append $args)
+}
+
 # Run an external program, returning {exit_code, stdout, stderr, skipped}.
 #
 # Output streams to the terminal by default so long-running actions show
@@ -105,7 +182,9 @@ export def show-command [
 # the result record for parsing. --dry-run prints the command without
 # executing it. --allow-failure captures failures (including a missing
 # executable, reported as exit 127) into the result record instead of failing.
-# Any other nonzero exit aborts with a redacted error message.
+# --timeout kills the command after the given seconds (GNU timeout or perl
+# alarm); a killed probe reports a nonzero exit so callers treat it as
+# unreachable. Any other nonzero exit aborts with a redacted error message.
 export def run-command [
   program: string # Program to run.
   args: list<string> = [] # Arguments to pass.
@@ -115,6 +194,7 @@ export def run-command [
   --allow-failure # Return the result instead of failing on nonzero exit.
   --quiet # Suppress the "running:" banner.
   --capture # Collect stdout/stderr into the result instead of streaming them.
+  --timeout: int = 0 # Kill the command after this many seconds (0 disables).
 ]: nothing -> record {
   let shown = (show-command $program $args)
   if $dry_run {
@@ -123,18 +203,19 @@ export def run-command [
   }
 
   if not $quiet { info $"running: ($shown)" }
+  let wrapped = (timeout-wrapper $timeout $program $args)
   let invoke = {| | if $cwd == null {
-    run-external $program ...$args
+    run-external ...$wrapped
   } else {
-    do { cd $cwd; run-external $program ...$args }
+    do { cd $cwd; run-external ...$wrapped }
   }}
   let result = if $capture {
     # Nushell aborts on nonzero external exit unless the output is consumed,
     # so capture through "complete" to read it and the exit code back.
     let invoke = {| | if $cwd == null {
-      run-external $program ...$args | complete
+      run-external ...$wrapped | complete
     } else {
-      do { cd $cwd; run-external $program ...$args | complete }
+      do { cd $cwd; run-external ...$wrapped | complete }
     }}
     if $allow_failure {
       try {

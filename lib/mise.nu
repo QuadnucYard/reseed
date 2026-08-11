@@ -117,7 +117,7 @@ export def mise-manager-config [
   root: path # Private state root.
   config: record # Loaded configuration.
 ]: nothing -> path {
-  let settings = $config.software.mise? | default {}
+  let settings = (($config.software? | default {}).mise? | default {})
   let configs = ($settings.configs? | default [])
   let relative = ($settings.manager_config? | default (if ($configs | is-empty) { "" } else { $configs | first }))
   if ($relative | describe) != "string" {
@@ -143,7 +143,7 @@ export def mise-shell-config [
   root: path # Private state root.
   config: record # Loaded configuration.
 ]: nothing -> path {
-  let settings = $config.software.mise
+  let settings = (($config.software? | default {}).mise? | default {})
   let configs = ($settings.configs? | default [])
   let manager = ($settings.manager_config? | default (if ($configs | is-empty) { "" } else { $configs | first }))
   let relative = ($settings.shell_config? | default $manager)

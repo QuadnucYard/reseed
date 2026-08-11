@@ -1,7 +1,8 @@
 # Private state repository operations (status, init, pull, commit) and the
 # offline source bundle builder.
 
-use core.nu [command-exists detect-os expand-home fail info run-command scrub-url state-sentinel-exists warning]
+use core.nu [command-exists detect-os expand-home fail info run-command scrub-url warning]
+use repo.nu [repo-push repo-refresh remote-default-branch]
 
 # Probe whether the private state root is a clean Git repository and, when it
 # is, report the current branch.
@@ -36,8 +37,8 @@ export def git-init [
 ] {
   let status = (git-status $root)
   if not $status.available { fail "Git is required to initialize the Reseed source" }
-  let branch = ($config.git.branch? | default main)
-  let remote = ($config.git.remote? | default origin)
+  let branch = (($config.git? | default {}).branch? | default main)
+  let remote = (($config.git? | default {}).remote? | default origin)
   if not $status.repository {
     run-command git ["-C" ($root | into string) "init" "-b" $branch] --dry-run=$dry_run | ignore
   } else {
@@ -77,140 +78,22 @@ export def git-init [
   info $"Reseed source repository: ($root)"
 }
 
-# Fail when the provided source is not a readable Git repository with a main
-# branch, so a bad URL fails before it can pollute the configured origin.
-def validate-source [
-  repository: string # Private state repository URL.
-] {
-  let remote_refs = (run-command git ["ls-remote" $repository] --allow-failure --quiet --capture)
-  if $remote_refs.exit_code != 0 {
-    fail $"Cannot read the private state repository: (scrub-url $repository)"
-  }
-  if not ($remote_refs.stdout | lines | any {|line| $line | str ends-with "refs/heads/main" }) {
-    fail $"The private state repository has no main branch: (scrub-url $repository)"
-  }
-}
-
-# Add the provided repository as origin when the state was seeded without one.
-def configure-origin [
-  root: path # Private state root.
-  repository: string # Private state repository URL.
-  missing: bool # True when no origin remote is configured yet.
-] {
-  if $missing {
-    run-command git ["-C" ($root | into string) "remote" "add" "origin" $repository] --quiet | ignore
-  }
-}
-
-# Fetch the provided state and reset the working tree to it, replacing files
-# the repository owns while keeping non-colliding untracked files.
-def adopt-origin [
-  root: path # Private state root.
-] {
-  run-command git ["-C" ($root | into string) "fetch" "origin" "main"] | ignore
-  run-command git ["-C" ($root | into string) "reset" "--hard" "origin/main"] | ignore
-}
-
-# Fast-forward the already-initialized private state from the provided
-# repository, so the platform bootstraps restore from the supplied source even
-# when the state root was seeded or cloned earlier. Refuses to sync a local
-# clone whose origin points at a different repository, validates that the
-# provided source is a readable Git repository with a main branch before
-# configuring it (so a bad source never pollutes origin), and leaves a dirty or
-# diverged working tree untouched unless --replace explicitly discards local
-# work. A local branch that is ahead of the remote (newer unpushed state) is
-# kept and reported as such; --replace discards it too. A state root that is
-# not yet a repository (or a template seed on an unborn branch) adopts the
-# provided state wholesale, replacing its colliding files while keeping any
-# non-colliding untracked files. Returns a record reporting whether the state
-# was adopted or synced and, when skipped, why.
+# Fast-forward or adopt the already-initialized private state from the
+# provided repository, so the platform bootstraps restore from the supplied
+# source even when the state root was seeded or cloned earlier. The branch is
+# resolved from the provided repository's default branch because this helper
+# deliberately does not load the configuration (it must work even when
+# config/recovery.nuon is missing locally). A dirty or diverged working tree is
+# left untouched unless --replace explicitly discards local work. Returns a
+# record reporting whether the state was adopted or synced and, when skipped,
+# why.
 export def git-sync [
   root: path # Private state root.
   repository: string # Private state repository URL.
   --replace # Discard local commits and uncommitted changes in favor of the provided state.
 ]: nothing -> record {
-  if not (command-exists git) { fail "Git is required to sync the private state" }
-  let probe = (run-command git ["-C" ($root | into string) "rev-parse" "--is-inside-work-tree"] --allow-failure --quiet --capture)
-  if $probe.exit_code != 0 {
-    # The bootstrap only syncs a root that already carries the sentinel. When
-    # that root was never initialized as a repository, initialize it and adopt
-    # the provided state so its files are copied in and the root becomes
-    # git-managed. git init touches no files; reset --hard replaces only files
-    # the provided repository owns and keeps non-colliding untracked files.
-    if (state-sentinel-exists $root) {
-      validate-source $repository
-      run-command git ["-C" ($root | into string) "init" "-b" "main"] | ignore
-      run-command git ["-C" ($root | into string) "remote" "add" "origin" $repository] --quiet | ignore
-      adopt-origin $root
-      info $"Initialized and adopted the provided private state: (scrub-url $repository)"
-      return {synced: true status: "adopted"}
-    }
-    warning "Private state is not a Git repository; leaving it unchanged"
-    return {synced: false status: "no-repo"}
-  }
-  let existing = (run-command git ["-C" ($root | into string) "remote" "get-url" "origin"] --allow-failure --quiet --capture)
-  let origin_missing = ($existing.exit_code != 0)
-  if not $origin_missing {
-    let current = ($existing.stdout | str trim)
-    if $current != $repository {
-      fail $"Git remote 'origin' already points to (scrub-url $current); refusing to sync from (scrub-url $repository)"
-    }
-  }
-  let unborn = (run-command git ["-C" ($root | into string) "rev-parse" "--verify" "HEAD"] --allow-failure --quiet --capture)
-  if $unborn.exit_code != 0 {
-    validate-source $repository
-    configure-origin $root $repository $origin_missing
-    adopt-origin $root
-    info $"Adopted the provided private state over the uncommitted local seed: (scrub-url $repository)"
-    return {synced: true status: "adopted"}
-  }
-  let dirty = (run-command git ["-C" ($root | into string) "status" "--porcelain"] --quiet --capture)
-  if not ($dirty.stdout | str trim | is-empty) {
-    if $replace {
-      validate-source $repository
-      configure-origin $root $repository $origin_missing
-      adopt-origin $root
-      warning "Discarded local private-state changes in favor of the provided state"
-      return {synced: true status: "replaced"}
-    }
-    warning "Private state has local changes; leaving it unchanged"
-    return {synced: false status: "dirty"}
-  }
-  validate-source $repository
-  configure-origin $root $repository $origin_missing
-  let pulled = (run-command git ["-C" ($root | into string) "pull" "--ff-only" "origin" "main"] --allow-failure --quiet --capture)
-  if $pulled.exit_code != 0 {
-    if ($pulled.stderr | str contains "fast-forward") {
-      if $replace {
-        adopt-origin $root
-        warning "Discarded local private-state commits in favor of the provided state"
-        return {synced: true status: "replaced"}
-      }
-      warning "Private state has diverged from origin; leaving it unchanged"
-      return {synced: false status: "diverged"}
-    }
-    let detail = (if ($pulled.stderr | str trim | is-empty) { $pulled.stdout } else { $pulled.stderr })
-    let detail = (scrub-url ($detail | str trim))
-    fail $"Could not sync the private state from (scrub-url $repository): ($detail)"
-  }
-  # A clean local branch that is ahead of origin holds newer unpushed state. It
-  # is never overwritten by the older remote; --replace discards it to adopt the
-  # remote exactly.
-  let ahead = (run-command git ["-C" ($root | into string) "rev-list" "--count" "origin/main..HEAD"] --allow-failure --quiet --capture)
-  if $ahead.exit_code == 0 {
-    let ahead_count = ($ahead.stdout | str trim | into int)
-    if $ahead_count > 0 {
-      if $replace {
-        adopt-origin $root
-        warning "Discarded local private-state commits ahead of origin in favor of the provided state"
-        return {synced: true status: "replaced"}
-      }
-      warning $"Local private state is ahead of origin by ($ahead_count) unpushed commits; leaving them in place; push them with 'reseed backup --commit --push'"
-      return {synced: true status: "ahead"}
-    }
-  }
-  info $"Synchronized private state from (scrub-url $repository)"
-  {synced: true status: "synced"}
+  let branch = (remote-default-branch $repository)
+  repo-refresh $root {git: {remote: origin branch: $branch}} $repository --replace=$replace
 }
 
 # Fast-forward pull the private state from its configured remote, refusing to
@@ -224,8 +107,8 @@ export def git-pull [
   if not $status.available { fail "Git is required to update the source" }
   if not $status.repository { warning "Source is not a Git repository; skipping pull"; return }
   if not $status.clean { fail "Source has local changes; commit or stash them before update" }
-  let remote = ($config.git.remote? | default origin)
-  let branch = ($config.git.branch? | default main)
+  let remote = (($config.git? | default {}).remote? | default origin)
+  let branch = (($config.git? | default {}).branch? | default main)
   run-command git ["-C" ($root | into string) "pull" "--ff-only" $remote $branch] --dry-run=$dry_run | ignore
 }
 
@@ -247,9 +130,8 @@ export def git-commit [
   if not $changed { info "No source changes to commit"; return }
   run-command git ["-C" ($root | into string) "commit" "-m" $message] --dry-run=$dry_run | ignore
   if $push {
-    let remote = ($config.git.remote? | default origin)
-    let branch = ($config.git.branch? | default main)
-    run-command git ["-C" ($root | into string) "push" $remote $branch] --dry-run=$dry_run | ignore
+    let pushed = (repo-push $root $config --dry-run=$dry_run)
+    if not $pushed.ok { fail $"Could not push the private state: ($pushed.detail)" }
   }
 }
 

@@ -147,7 +147,7 @@ export def setup-ssh-key [
 ]: nothing -> record {
   let key = (ssh-key-status)
   if $key.key_present { return {step: ssh-key ok: true detail: $"key exists: ($key.key_path)"} }
-  let configured_comment = ($config.setup.ssh.comment? | default "" | str trim)
+  let configured_comment = (((($config.setup? | default {}).ssh? | default {}).comment? | default "") | str trim)
   let email = (git-config-get "user.email")
   let comment = if ($configured_comment | is-empty) { $email } else { $configured_comment }
   if $dry_run {

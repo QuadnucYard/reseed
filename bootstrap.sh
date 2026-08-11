@@ -2,6 +2,7 @@
 set -eu
 
 state_repository=""
+state_source=""
 state_root=""
 profiles="personal"
 no_restore=0
@@ -20,11 +21,15 @@ ustc_install_url="https://mirrors.ustc.edu.cn/misc/brew-install.sh"
 # Print the command-line usage.
 usage() {
   cat <<'EOF'
-Usage: bootstrap.sh [--state-repository URL] [--state-root PATH]
+Usage: bootstrap.sh [--state-repository URL] [--state-source PATH] [--state-root PATH]
                     [--profiles NAMES] [--no-restore] [--offline] [--dry-run]
                     [--update-tools] [--no-update-tools]
                     [--brew-install-url URL] [--homebrew-mirror ustc|tuna]
 
+--state-source PATH      Import an immutable downloaded private-state source
+                         (a Git checkout, bundle archive, or raw snapshot)
+                         and restore from it. Mutually exclusive with
+                         --state-repository.
 --update-tools      Upgrade outdated bootstrap tools without prompting.
 --no-update-tools   Skip the bootstrap-tool update check entirely.
 --brew-install-url URL   Install Homebrew from a custom installer script.
@@ -39,6 +44,7 @@ parse_args() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --state-repository|--repository) state_repository=$2; shift 2 ;;
+      --state-source) state_source=$2; shift 2 ;;
       --state-root) state_root=$2; shift 2 ;;
       --profiles) profiles=$2; shift 2 ;;
       --no-restore) no_restore=1; shift ;;
@@ -52,6 +58,10 @@ parse_args() {
       *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
     esac
   done
+  if [ -n "$state_source" ] && [ -n "$state_repository" ]; then
+    echo "--state-source and --state-repository are mutually exclusive" >&2
+    exit 2
+  fi
   if [ -n "$brew_install_url" ] && [ -n "$homebrew_mirror" ]; then
     echo "--brew-install-url and --homebrew-mirror are mutually exclusive" >&2
     exit 2
@@ -83,10 +93,12 @@ resolve_tools() {
   fi
 }
 
-# In offline mode every bootstrap-contract tool must already be available.
+# In offline mode every bootstrap-contract tool must already be available. A
+# --state-source path is local and compatible with offline recovery; only a
+# remote --state-repository is rejected.
 ensure_offline_tools() {
   if [ -n "$state_repository" ]; then
-    echo "--offline cannot be combined with --state-repository; use an extracted bundle state directory" >&2
+    echo "--offline cannot be combined with --state-repository; use an extracted bundle state directory or --state-source" >&2
     exit 2
   fi
   for command_name in git chezmoi nu; do
@@ -329,9 +341,10 @@ sync_state_repository() {
 
 # Clone the private state repository when the state root is uninitialized.
 # Refuses a nonempty directory without the .reseed-state sentinel, reads the
-# remote before cloning so a wrong URL fails early, and only clones when the
-# remote has a main branch. An already-initialized root is instead synced from
-# the provided repository so a stale local copy repairs itself.
+# remote before cloning so a wrong URL fails early, and clones the remote's
+# default branch (from its symbolic HEAD) rather than assuming main. An
+# already-initialized root is instead synced from the provided repository so a
+# stale local copy repairs itself.
 ensure_state_repository() {
   sentinel=$state_root/.reseed-state
   if [ -z "$state_repository" ]; then
@@ -345,15 +358,17 @@ ensure_state_repository() {
     echo "Refusing nonempty state directory without .reseed-state: $state_root" >&2
     exit 1
   fi
-  if ! refs=$(git ls-remote "$state_repository"); then
+  if ! sym=$(git ls-remote --symref "$state_repository" HEAD 2>/dev/null); then
     echo "Cannot read the private state repository: $(scrub_url "$state_repository")" >&2
     exit 1
   fi
-  if printf '%s\n' "$refs" | grep -q 'refs/heads/main$'; then
+  default_branch=$(printf '%s\n' "$sym" | awk '/^ref:/ { sub(/^ref: refs\/heads\//, ""); print $1; exit }')
+  default_branch=${default_branch:-main}
+  if printf '%s\n' "$sym" | grep -q "refs/heads/$default_branch$"; then
     printf '%s\n' "reseed: cloning private state"
-    git clone --branch main --single-branch "$state_repository" "$state_root"
-  elif [ -n "$refs" ]; then
-    echo "The private state repository has content but no main branch." >&2
+    git clone --branch "$default_branch" --single-branch "$state_repository" "$state_root"
+  elif [ -n "$sym" ]; then
+    echo "The private state repository has content but no $default_branch branch." >&2
     exit 1
   fi
 }
@@ -373,23 +388,29 @@ initialize_state() {
   fi
 }
 
-# Run the restore (or report how to plan it) once the state is ready.
+# Run the restore (or report how to plan it) once the state is ready. When a
+# --state-source was given, the restore command receives --state-source so the
+# downloaded source is validated and imported atomically before the recovery
+# plan runs. Arguments are built positionally so paths containing spaces are
+# never split.
 run_restore() {
   printf '%s\n' "reseed: engine: $script_dir"
   printf '%s\n' "reseed: private state: $state_root"
   if [ "$no_restore" -eq 1 ]; then
     printf '%s\n' "reseed: bootstrap completed; run: nu '$entrypoint' plan --state-root '$state_root' --profiles '$profiles'"
-  elif [ "$dry_run" -eq 1 ]; then
-    if [ "$offline" -eq 1 ]; then
-      nu "$entrypoint" restore --state-root "$state_root" --profiles "$profiles" --dry-run --skip-software
-    else
-      nu "$entrypoint" restore --state-root "$state_root" --profiles "$profiles" --dry-run
-    fi
-  elif [ "$offline" -eq 1 ]; then
-    nu "$entrypoint" restore --state-root "$state_root" --profiles "$profiles" --skip-software
-  else
-    nu "$entrypoint" restore --state-root "$state_root" --profiles "$profiles"
+    return
   fi
+  set -- "$entrypoint" restore --state-root "$state_root" --profiles "$profiles"
+  if [ -n "$state_source" ]; then
+    set -- "$@" --state-source "$state_source"
+  fi
+  if [ "$dry_run" -eq 1 ]; then
+    set -- "$@" --dry-run
+  fi
+  if [ "$offline" -eq 1 ]; then
+    set -- "$@" --skip-software
+  fi
+  nu "$@"
 }
 
 parse_args "$@"
@@ -409,6 +430,11 @@ fi
 entrypoint=$script_dir/reseed.nu
 
 resolve_state_root
-ensure_state_repository
-initialize_state
-run_restore
+if [ -n "$state_source" ]; then
+  # A downloaded source drives recovery directly: import it and restore.
+  run_restore
+else
+  ensure_state_repository
+  initialize_state
+  run_restore
+fi
