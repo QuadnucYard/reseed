@@ -326,11 +326,12 @@ def test-mise-commands [
   assert eq (mise-exec-args ($state_root | path join "mise.toml") "pnpm" ["--version"]) ["-C" ($state_root | into string) "exec" "--" "pnpm" "--version"] "mise exec command construction"
   assert eq (mise-exec-args ($state_root | path join "mise.work.toml") "uv" ["--version"]) ["-C" ($state_root | into string) "-E" "work" "exec" "--" "uv" "--version"] "mise environment command construction"
   assert eq (mise-shell-config $state_root $config) (($state_root | path join "mise.toml") | path expand --no-symlink) "mise shell config resolves from configuration"
-  assert eq ((managed-tool-environment).PNPM_HOME) (managed-bin-dir | into string) "PNPM_HOME uses managed bin directory"
+  assert eq ((managed-tool-environment).PNPM_HOME) (managed-bin-dir | path dirname | into string) "PNPM_HOME uses managed root so pnpm's global bin dir is the managed bin directory"
   assert eq ((managed-tool-environment).UV_TOOL_BIN_DIR) (managed-bin-dir | into string) "UV_TOOL_BIN_DIR uses managed bin directory"
   assert eq ((managed-tool-environment).YARN_PREFIX) (managed-bin-dir | path dirname | into string) "YARN_PREFIX uses managed root"
   assert eq ((managed-tool-environment).BUN_INSTALL) (managed-bin-dir | path dirname | into string) "BUN_INSTALL uses managed root"
   assert eq ((managed-tool-environment).CARGO_INSTALL_ROOT) (managed-bin-dir | path dirname | into string) "Cargo installs use managed root"
+  assert (((managed-tool-environment).PATH | first) == (managed-bin-dir | into string)) "PATH prepends managed bin directory"
   assert eq (cargo-binstall-args (managed-bin-dir | path dirname) [ripgrep]) ["--no-confirm" "--disable-telemetry" "--root" (managed-bin-dir | path dirname | into string) ripgrep] "cargo-binstall uses explicit shared root"
 }
 

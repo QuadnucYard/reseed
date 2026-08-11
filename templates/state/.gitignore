@@ -8,3 +8,5 @@ reseed-source*.tar.gz
 bin/
 shell/
 install/
+/global/
+/store/

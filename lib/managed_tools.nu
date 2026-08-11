@@ -10,17 +10,20 @@ export def managed-bin-dir []: nothing -> path {
 }
 
 # Environment variables that make each package manager install into the shared
-# managed binary directory. YARN_PREFIX and BUN_INSTALL point one level up
-# because Yarn 1 and Bun derive their bin directories relative to them.
+# managed binary directory. PNPM_HOME, YARN_PREFIX, and BUN_INSTALL point one
+# level up because pnpm, Yarn 1, and Bun derive their bin directories relative
+# to them. PATH prepends the managed bin directory because pnpm's global
+# installs refuse to run when their global bin directory is absent from PATH.
 export def managed-tool-environment []: nothing -> record {
   let directory = (managed-bin-dir | into string)
   let root = (managed-bin-dir | path dirname | into string)
   {
-    PNPM_HOME: $directory
+    PNPM_HOME: $root
     UV_TOOL_BIN_DIR: $directory
     YARN_PREFIX: $root
     BUN_INSTALL: $root
     CARGO_INSTALL_ROOT: $root
+    PATH: ([$directory] | append $env.PATH | uniq)
   }
 }
 
