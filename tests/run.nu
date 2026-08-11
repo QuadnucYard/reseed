@@ -841,6 +841,23 @@ def test-git-sync [] {
     "local replace\n" | save --append ($seeded | path join "mise.toml")
     git-sync $seeded ($origin | into string) --replace
     assert (not ((open --raw ($seeded | path join "mise.toml")) | str contains "local replace")) "--replace discards uncommitted changes"
+
+    # A clean local branch ahead of origin (newer unpushed commits) is kept and
+    # reported; --replace discards it to adopt the remote exactly.
+    let ahead_clone = ($sandbox | path join "ahead")
+    run-command git ["clone" "--branch" "main" "--single-branch" ($origin | into string) ($ahead_clone | into string)] --quiet | ignore
+    configure-git-identity $ahead_clone
+    "local ahead\n" | save --append ($ahead_clone | path join "mise.toml")
+    run-command git ["-C" ($ahead_clone | into string) "add" "--all"] --quiet | ignore
+    run-command git ["-C" ($ahead_clone | into string) "commit" "-m" "ahead commit"] --quiet | ignore
+    let ahead_result = (git-sync $ahead_clone ($origin | into string))
+    assert $ahead_result.synced "ahead sync reports success"
+    assert eq $ahead_result.status ahead "ahead sync reports the ahead status"
+    let ahead_head = (run-command git ["-C" ($ahead_clone | into string) "log" "-1" "--format=%s"] --quiet --capture)
+    assert eq ($ahead_head.stdout | str trim) "ahead commit" "ahead sync keeps the newer local commit"
+    git-sync $ahead_clone ($origin | into string) --replace
+    let replaced_ahead_head = (run-command git ["-C" ($ahead_clone | into string) "log" "-1" "--format=%s"] --quiet --capture)
+    assert eq ($replaced_ahead_head.stdout | str trim) "rival edit" "--replace discards ahead local commits"
   }
 }
 

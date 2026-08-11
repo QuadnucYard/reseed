@@ -118,10 +118,12 @@ def adopt-origin [
 # provided source is a readable Git repository with a main branch before
 # configuring it (so a bad source never pollutes origin), and leaves a dirty or
 # diverged working tree untouched unless --replace explicitly discards local
-# work. A state root that is not yet a repository (or a template seed on an
-# unborn branch) adopts the provided state wholesale, replacing its colliding
-# files while keeping any non-colliding untracked files. Returns a record
-# reporting whether the state was adopted or synced and, when skipped, why.
+# work. A local branch that is ahead of the remote (newer unpushed state) is
+# kept and reported as such; --replace discards it too. A state root that is
+# not yet a repository (or a template seed on an unborn branch) adopts the
+# provided state wholesale, replacing its colliding files while keeping any
+# non-colliding untracked files. Returns a record reporting whether the state
+# was adopted or synced and, when skipped, why.
 export def git-sync [
   root: path # Private state root.
   repository: string # Private state repository URL.
@@ -190,6 +192,22 @@ export def git-sync [
     let detail = (if ($pulled.stderr | str trim | is-empty) { $pulled.stdout } else { $pulled.stderr })
     let detail = (scrub-url ($detail | str trim))
     fail $"Could not sync the private state from (scrub-url $repository): ($detail)"
+  }
+  # A clean local branch that is ahead of origin holds newer unpushed state. It
+  # is never overwritten by the older remote; --replace discards it to adopt the
+  # remote exactly.
+  let ahead = (run-command git ["-C" ($root | into string) "rev-list" "--count" "origin/main..HEAD"] --allow-failure --quiet --capture)
+  if $ahead.exit_code == 0 {
+    let ahead_count = ($ahead.stdout | str trim | into int)
+    if $ahead_count > 0 {
+      if $replace {
+        adopt-origin $root
+        warning "Discarded local private-state commits ahead of origin in favor of the provided state"
+        return {synced: true status: "replaced"}
+      }
+      warning $"Local private state is ahead of origin by ($ahead_count) unpushed commits; leaving them in place; push them with 'reseed backup --commit --push'"
+      return {synced: true status: "ahead"}
+    }
   }
   info $"Synchronized private state from (scrub-url $repository)"
   {synced: true status: "synced"}
