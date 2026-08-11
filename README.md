@@ -18,7 +18,11 @@ On this Windows machine, the private state path resolves to
 
 `reseed init` copies the generic scaffold from `templates/state/` into the
 private location and runs `git init -b main`. It refuses a nonempty directory
-without the `.reseed-state` sentinel.
+without the `.reseed-state` sentinel. Re-running it is safe: it also copies any
+missing engine-owned template file (such as `scripts/configure-shells.nu`) into
+an existing state repository, and `reseed restore` and `reseed update` do the
+same before validating desired state, so a repository that lost its shell
+generator repairs itself.
 
 ```powershell
 # Initialize local private state. This is safe to run again.

@@ -2,12 +2,12 @@ use std assert
 use ./helpers.nu *
 use ../lib/config.nu [config-fingerprint deep-merge load-config parse-profiles validate-config]
 use ../lib/prelude.nu *
-use ../lib/workflow.nu [workflow-plan workflow-verification-tools]
+use ../lib/workflow.nu [sync-engine-files workflow-plan workflow-verification-tools]
 use ../lib/secrets.nu [commit-change-summary scan-commit-secrets secret-content-matches secret-name-matches]
 use ../integrations/bootstrap.nu [bootstrap-brew-items bootstrap-outdated bootstrap-tools bootstrap-winget-ids parse-brew-outdated parse-winget-upgrade-table]
 use ../integrations/homebrew.nu [brewfile-items brewfile-summary homebrew-env homebrew-mirror-label homebrew-persist-env homebrew-shell-snippets native-brewfile-items parse-outdated-names]
 use ../integrations/managers/cargo_binstall.nu [cargo-binstall-args cargo-binstall-packages]
-use ../integrations/mise.nu [mise-install-plan mise-reconcile mise-shell-task mise-shell-task-environment]
+use ../integrations/mise.nu [mise-configure-shells mise-install-plan mise-reconcile mise-shell-task mise-shell-task-environment]
 use ../integrations/managers/node/node_manager.nu [node-manager-entries node-manager-install-args node-manager-missing-packages node-manager-update-args node-package-record node-spec-parse node-yarn-major-version parse-bun-inventory parse-node-dependency-inventory parse-yarn-inventory]
 use ../integrations/managers/node/pnpm.nu [parse-pnpm-inventory pnpm-missing-packages pnpm-package-record pnpm-packages]
 use ../integrations/tooling.nu [tooling-observe]
@@ -465,6 +465,45 @@ def test-shell-generation [
   }
 }
 
+# Re-seeding engine-owned template files into an existing state repository.
+def test-sync-engine-files [
+  engine_root: path # Engine root providing the template.
+  state_root: path # State template root.
+] {
+  with-temp-dir "reseed-sync-test.XXXXXXXX" {|root|
+    for entry in (ls --all $state_root) {
+      cp --recursive $entry.name $root
+    }
+    rm ($root | path join "scripts" "configure-shells.nu")
+    assert (not (($root | path join "scripts" "configure-shells.nu") | path exists)) "fixture starts without the generator"
+    sync-engine-files $engine_root $root
+    assert (($root | path join "scripts" "configure-shells.nu") | path exists) "sync re-seeds a missing generator"
+    rm ($root | path join "scripts" "configure-shells.nu")
+    sync-engine-files $engine_root $root --dry-run
+    assert (not (($root | path join "scripts" "configure-shells.nu") | path exists)) "dry-run sync does not write"
+  }
+}
+
+# The reseed:shells pre-flight reports a missing generator instead of letting
+# mise fail with an opaque "File not found".
+def test-shell-generator-preflight [
+  engine_root: path # Engine root providing the template.
+  state_root: path # State template root.
+] {
+  with-temp-dir "reseed-preflight-test.XXXXXXXX" {|root|
+    for entry in (ls --all $state_root) {
+      cp --recursive $entry.name $root
+    }
+    rm ($root | path join "scripts" "configure-shells.nu")
+    let config = (load-config $root [personal])
+    let message = (try {
+      mise-configure-shells $root $config --dry-run
+      ""
+    } catch {|error| $error.msg? | default ($error | to nuon) })
+    assert (($message | str contains "missing")) "missing generator produces a clear error"
+  }
+}
+
 # Mise backend dependencies, install ordering, and package record
 # normalization.
 def test-mise-backends [
@@ -678,6 +717,8 @@ def main [] {
   test-missing-packages
   test-mise-config-validation $state_root
   test-checkpoints $engine_root $state_root
+  test-sync-engine-files $engine_root $state_root
+  test-shell-generator-preflight $engine_root $state_root
 
   print "All Reseed tests passed"
 }

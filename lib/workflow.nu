@@ -67,6 +67,42 @@ def ensure-state-root [
   }
 }
 
+# Engine-owned template files that are copied into existing state repositories
+# when missing, so repositories seeded before the file existed (or that lost it)
+# stay runnable. Only add-if-missing: user edits are never overwritten.
+def engine-owned-files [
+  engine_root: path # Engine directory providing the template.
+]: nothing -> list<path> {
+  [
+    ($engine_root | path join "templates" "state" "scripts" "configure-shells.nu")
+  ]
+}
+
+# Copy missing engine-owned template files into an existing state repository.
+# A missing shell generator would otherwise fail desired-state validation, so
+# this runs before check-config in restore and update and on every re-runnable
+# init. Existing copies are left untouched so user customizations survive.
+export def sync-engine-files [
+  engine_root: path # Engine directory providing the template.
+  state_root: path # Private state root.
+  --dry-run # Report the copies without writing them.
+] {
+  let template_root = ($engine_root | path join "templates" "state")
+  for template in (engine-owned-files $engine_root) {
+    let relative = ($template | path relative-to $template_root)
+    let target = ($state_root | path join $relative)
+    if ($template | path exists) and not ($target | path exists) {
+      if $dry_run {
+        info $"would seed engine-owned file to state: ($relative)"
+      } else {
+        mkdir ($target | path dirname)
+        cp $template $target
+        info $"seeded engine-owned file to state: ($relative)"
+      }
+    }
+  }
+}
+
 # Create or validate the private state repository and initialize Git.
 export def workflow-init [
   engine_root: path # Engine directory.
@@ -76,6 +112,7 @@ export def workflow-init [
   --dry-run # Show what would be initialized without writing files.
 ] {
   ensure-state-root $engine_root $state_root --dry-run=$dry_run
+  sync-engine-files $engine_root $state_root --dry-run=$dry_run
   let config_root = if ((state-sentinel $state_root) | path exists) { $state_root } else { state-template $engine_root }
   let config = (load-config $config_root $profiles)
   check-config $config_root $config
@@ -209,6 +246,7 @@ export def workflow-restore [
   --skip-software # Skip native packages and mise-managed tools.
 ] {
   check-bootstrap --skip-software=$skip_software
+  sync-engine-files $engine_root $root --dry-run=$dry_run
   check-config $root $config
   let plan = (workflow-plan $root $config --skip-software=$skip_software)
   $plan | table | print
@@ -311,6 +349,7 @@ export def workflow-update [
   --dry-run # Show pull and update actions without changing anything.
 ] {
   check-bootstrap
+  sync-engine-files $engine_root $root --dry-run=$dry_run
   check-config $root $config
   if not $dry_run and not (confirm "Pull configuration and update managed software?" --yes=$yes) { info "Update cancelled"; return }
   git-pull $root $config --dry-run=$dry_run

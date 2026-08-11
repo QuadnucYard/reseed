@@ -27,6 +27,12 @@ Starship follows this model:
 - `scripts/configure-shells.nu` generates Starship's Nushell autoload file in
   `$nu.data-dir/vendor/autoload` and the shared manager-path adapters.
 
+The generator is an engine-owned template file: `reseed init`, `restore`, and
+`update` copy it back into a state repository that is missing it (existing
+copies are never overwritten). The engine runs it directly with an absolute
+path, so shell generation never depends on the working directory a mise task
+would resolve relative paths against.
+
 Shell syntax is different, so activation cannot be one literal file. The
 configuration and ownership remain unified, while generated initialization
 code stays outside Git and is recreated after chezmoi applies the home state.

@@ -147,7 +147,18 @@ export def mise-configure-shells [
   }
   let task_config = (mise-task-config $root $settings)
   if $task_config == null { error make {msg: $"Cannot run mise shell task '($task)' without a mise config"} }
-  run-command mise (mise-args $task_config ["run" $task]) --environment=(mise-shell-task-environment $root $config) --dry-run=$dry_run | ignore
+  let environment = (mise-shell-task-environment $root $config)
+  if $task == "reseed:shells" {
+    # The stock generator is state-repo-owned; invoke it with an absolute path
+    # so resolution never depends on the mise task working directory.
+    let generator = ($root | path join "scripts" "configure-shells.nu")
+    if not ($generator | path exists) {
+      error make {msg: $"The ('reseed:shells') shell task requires its generator, which is missing: ($generator). Re-run 'reseed init' or 'reseed restore' to seed engine-owned files into the state repository"}
+    }
+    run-command mise (mise-exec-args $task_config "nu" ["--no-config-file" ($generator | into string)]) --environment=$environment --dry-run=$dry_run | ignore
+    return
+  }
+  run-command mise (mise-args $task_config ["run" $task]) --environment=$environment --dry-run=$dry_run | ignore
 }
 
 # Upgrade every mise config and refresh the managed-tools lifecycle.
