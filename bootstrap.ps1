@@ -113,12 +113,14 @@ function Format-RedactedUrl {
 .DESCRIPTION
     Installs with the requested scope first; when the package does not
     support that scope, retries with WinGet's default scope. Verifies the
-    command appears on PATH afterwards.
+    command appears on PATH afterwards. Required packages (the bootstrap
+    contract) stop the bootstrap on failure; optional packages only warn.
 #>
 function Install-WinGetPackage {
     param(
         [string]$Id,
-        [string]$Command
+        [string]$Command,
+        [switch]$Required
     )
 
     if (Test-Command $Command) {
@@ -145,25 +147,35 @@ function Install-WinGetPackage {
         )
         & winget.exe @arguments
         if ($LASTEXITCODE -ne 0) {
-            throw "WinGet failed to install $Id (exit $LASTEXITCODE)."
+            if ($Required) {
+                throw "WinGet failed to install $Id (exit $LASTEXITCODE). $Id is required for the bootstrap to continue."
+            }
+            Write-Warning "WinGet failed to install $Id (exit $LASTEXITCODE); continuing without it."
+            return
         }
     }
     Refresh-Path
     if (-not (Test-Command $Command)) {
-        throw "$Id was installed but $Command is not visible on PATH. Open a new terminal and rerun bootstrap.ps1."
+        if ($Required) {
+            throw "$Id was installed but $Command is not visible on PATH. Open a new terminal and rerun bootstrap.ps1."
+        }
+        Write-Warning "$Id was installed but $Command is not visible on PATH; continuing without it."
     }
 }
 
 <#
 .SYNOPSIS
-    The bootstrap contract: WinGet identifiers and their commands.
+    The bootstrap contract: WinGet identifiers, their commands, and whether
+    the package is required. Git, chezmoi, and Nushell are the recovery
+    critical tools (the offline recovery trio), so their install failure
+    stops the bootstrap; mise is software-only and failure only warns.
 #>
 function Get-BootstrapContract {
     return @(
-        @{ Id = "Git.Git"; Command = "git.exe" }
-        @{ Id = "twpayne.chezmoi"; Command = "chezmoi.exe" }
-        @{ Id = "Nushell.Nushell"; Command = "nu.exe" }
-        @{ Id = "jdx.mise"; Command = "mise.exe" }
+        @{ Id = "Git.Git"; Command = "git.exe"; Required = $true }
+        @{ Id = "twpayne.chezmoi"; Command = "chezmoi.exe"; Required = $true }
+        @{ Id = "Nushell.Nushell"; Command = "nu.exe"; Required = $true }
+        @{ Id = "jdx.mise"; Command = "mise.exe"; Required = $false }
     )
 }
 
@@ -338,7 +350,7 @@ function Ensure-BootstrapTools {
     }
     else {
         foreach ($tool in Get-BootstrapContract) {
-            Install-WinGetPackage -Id $tool.Id -Command $tool.Command
+            Install-WinGetPackage -Id $tool.Id -Command $tool.Command -Required:$tool.Required
         }
         Update-OutdatedBootstrapTools
     }

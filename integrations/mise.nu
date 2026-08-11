@@ -94,34 +94,40 @@ export def mise-shell-task [settings: record]: nothing -> string {
 # bin directory, then restore the cargo-binstall, uv, and Node manager globals,
 # and finally run general restore tasks. Shell configuration runs after
 # chezmoi so generated profile loaders cannot be overwritten by apply.
+# Package-manager install failures only warn; the returned count lets the
+# workflow fail with a summary at the end.
 export def mise-restore [
   root: path # Private state root.
   config: record # Loaded configuration.
   --dry-run # Show the installs without running them.
-] {
+]: nothing -> int {
   let settings = $config.software.mise
-  if not ($settings.enabled? | default false) { return }
+  if not ($settings.enabled? | default false) { return 0 }
   if not (command-exists mise) and not $dry_run { error make {msg: "mise is required for the portable tools stage"} }
+  mut failures = 0
   for command in (mise-install-plan $root $config) {
-    run-command mise $command.args --dry-run=$dry_run | ignore
+    let result = (run-or-warn mise $command.args --dry-run=$dry_run --label=$"mise install ($command.config)")
+    if $result.exit_code != 0 { $failures += 1 }
   }
 
   prepare-managed-bin --dry-run=$dry_run
 
-  cargo-binstall-restore $root $config --dry-run=$dry_run
-  uv-restore $root $config --dry-run=$dry_run
+  $failures += (cargo-binstall-restore $root $config --dry-run=$dry_run)
+  $failures += (uv-restore $root $config --dry-run=$dry_run)
   for manager in [pnpm yarn bun] {
-    node-manager-restore $root $config $manager --dry-run=$dry_run
+    $failures += (node-manager-restore $root $config $manager --dry-run=$dry_run)
   }
 
   # Restore tasks run against the last configured config, matching mise's
-  # own "last config wins" scoping for ad-hoc commands.
+  # own "last config wins" scoping for ad-hoc commands. They are not package
+  # installs, so their failures still stop the stage.
   let task_config = (mise-task-config $root $settings)
   let shell_task = (mise-shell-task $settings)
   for task in (($settings.restore_tasks? | default []) | where {|task| $task != $shell_task }) {
     if $task_config == null { error make {msg: $"Cannot run mise task '($task)' without a mise config"} }
     run-command mise (mise-args $task_config ["run" $task]) --dry-run=$dry_run | ignore
   }
+  $failures
 }
 
 # Generate shell adapters and install their profile loaders after chezmoi has
@@ -145,24 +151,28 @@ export def mise-configure-shells [
 }
 
 # Upgrade every mise config and refresh the managed-tools lifecycle.
+# Upgrade failures warn and are counted so the workflow can exit nonzero.
 export def mise-update [
   root: path # Private state root.
   config: record # Loaded configuration.
   --dry-run # Show the upgrades without running them.
-] {
+]: nothing -> int {
   let settings = $config.software.mise
-  if not ($settings.enabled? | default false) or not ($settings.update? | default true) { return }
-  if not (command-exists mise) and not $dry_run { warning "mise is unavailable; skipping portable tool updates"; return }
+  if not ($settings.enabled? | default false) or not ($settings.update? | default true) { return 0 }
+  if not (command-exists mise) and not $dry_run { warning "mise is unavailable; skipping portable tool updates"; return 0 }
+  mut failures = 0
   for relative in ($settings.configs? | default []) {
     let path = ($root | path join $relative)
-    run-command mise (mise-args $path ["upgrade" "--yes"]) --dry-run=$dry_run | ignore
+    let result = (run-or-warn mise (mise-args $path ["upgrade" "--yes"]) --dry-run=$dry_run --label=$"mise upgrade ($relative)")
+    if $result.exit_code != 0 { $failures += 1 }
   }
   prepare-managed-bin --dry-run=$dry_run
-  cargo-binstall-update $root $config --dry-run=$dry_run
-  uv-update $root $config --dry-run=$dry_run
+  $failures += (cargo-binstall-update $root $config --dry-run=$dry_run)
+  $failures += (uv-update $root $config --dry-run=$dry_run)
   for manager in [pnpm yarn bun] {
-    node-manager-update $root $config $manager --dry-run=$dry_run
+    $failures += (node-manager-update $root $config $manager --dry-run=$dry_run)
   }
+  $failures
 }
 
 # Reconcile report for the whole portable-tools layer: mise outdated status

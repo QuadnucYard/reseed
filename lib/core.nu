@@ -158,11 +158,34 @@ export def run-command [
       } else {
         $normalized.stderr | str trim
       }
-      fail $"Command failed (exit ($normalized.exit_code)): ($shown)\n(scrub-url $detail)"
+      fail $"Command failed with exit code ($normalized.exit_code): ($shown)\n(scrub-url $detail)"
     }
-    fail $"Command failed (exit ($normalized.exit_code)): ($shown)"
+    fail $"Command failed with exit code ($normalized.exit_code): ($shown)"
   }
   $normalized
+}
+
+# Run a command, warning instead of failing when it exits nonzero, so a
+# package-manager failure never aborts the restore or update. Output streams
+# live; the returned record carries the exit code (and stderr when captured).
+# Callers still count failures so the workflow can exit nonzero at the end.
+export def run-or-warn [
+  program: string # Program to run.
+  args: list<string> = [] # Arguments to pass.
+  --cwd: path # Working directory for the child process.
+  --environment: record = {} # Environment variables to set for the child.
+  --dry-run # Print the command without executing it.
+  --quiet # Suppress the "running:" banner.
+  --capture # Collect stdout/stderr into the result instead of streaming them.
+  --label: string = "" # Context prepended to the warning message.
+]: nothing -> record {
+  let result = (run-command $program $args --cwd=$cwd --environment=$environment --dry-run=$dry_run --allow-failure --quiet=$quiet --capture=$capture)
+  if $result.exit_code != 0 {
+    let detail = (if $capture { ($result.stderr | str trim) } else { "" })
+    let detail = (if ($detail | is-empty) { $"exit code ($result.exit_code)" } else { $detail })
+    warning (if ($label | is-empty) { $"Command failed: ($detail)" } else { $"($label) failed: ($detail)" })
+  }
+  $result
 }
 
 # Ask the user for y/N confirmation; --yes accepts without prompting.

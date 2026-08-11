@@ -55,6 +55,20 @@ def test-config-layer [
   assert eq $success_run.exit_code 0 "successful streamed commands exit clean"
   let success_captured = (run-command nu ["-c" "print hi"] --allow-failure --quiet --capture)
   assert eq ($success_captured.stdout | str trim) "hi" "captured commands collect stdout"
+  # A failing command without --allow-failure must raise a catchable error
+  # (not exit the shell), so stages can record and resume around the failure.
+  let failure_error = (try {
+    run-command nu ["-c" "exit 5"] --quiet
+    {caught: false message: ""}
+  } catch {|error|
+    {caught: true message: ($error.msg? | default "")}
+  })
+  assert $failure_error.caught "failing commands raise a catchable error"
+  assert ($failure_error.message | str contains "exit code 5") "command failure message reports the exit code"
+  let warned = (run-or-warn nu ["-c" "exit 7"] --quiet --label="probe")
+  assert eq $warned.exit_code 7 "run-or-warn reports the failing exit code"
+  let warned_dry = (run-or-warn nu ["-c" "exit 7"] --quiet --dry-run)
+  assert eq $warned_dry.exit_code 0 "run-or-warn dry runs report success"
   let config = (load-config $state_root [personal])
   assert eq (mise-shell-task $config.software.mise) "reseed:shells" "explicit shell task selection"
   let shell_environment = (mise-shell-task-environment $state_root $config)

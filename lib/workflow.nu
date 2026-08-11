@@ -168,7 +168,10 @@ def check-bootstrap [
 }
 
 # Run one restore stage against the checkpoint: skip it when already complete
-# (--resume), record failures, and mark it complete on success.
+# (--resume), record failures, and mark it complete on success. The action's
+# return value (the number of package-manager failures it tolerated) is
+# returned alongside the updated checkpoint so the workflow can fail with a
+# summary after every stage has run.
 def execute-stage [
   config: record # Loaded configuration.
   checkpoint: record # Current checkpoint.
@@ -178,20 +181,20 @@ def execute-stage [
 ]: nothing -> record {
   if (stage-done $checkpoint $stage) {
     info $"resume: skipping completed stage '($stage)'"
-    return $checkpoint
+    return {checkpoint: $checkpoint result: 0}
   }
   info $"stage: ($stage)"
   let outcome = (try {
-    do $action
-    {ok: true message: ""}
+    {ok: true message: "" result: (do $action)}
   } catch {|error|
-    {ok: false message: (if $error.msg? == null { $error | to nuon } else { $error.msg })}
+    {ok: false message: (if $error.msg? == null { $error | to nuon } else { $error.msg }) result: 0}
   })
   if not $outcome.ok {
     fail-stage $config $checkpoint $stage $outcome.message --dry-run=$dry_run | ignore
     fail $"Restore stopped in stage '($stage)': ($outcome.message)"
   }
-  complete-stage $config $checkpoint $stage --dry-run=$dry_run
+  let checkpoint = (complete-stage $config $checkpoint $stage --dry-run=$dry_run)
+  {checkpoint: $checkpoint result: ($outcome.result? | default 0 | into int)}
 }
 
 # Restore the machine: native packages, mise tools, configuration, snapshots,
@@ -212,41 +215,53 @@ export def workflow-restore [
   if not $dry_run and not (confirm "Apply this recovery plan?" --yes=$yes) { info "Restore cancelled"; return }
 
   mut checkpoint = (load-checkpoint $root $config (config-fingerprint $root $config --engine-root=$engine_root) --resume=$resume)
+  mut failures = 0
   let os = (detect-os)
   if $skip_software {
     info "skipping system packages and portable tools"
   } else {
-    $checkpoint = (execute-stage $config $checkpoint system-packages {
-      if $os == "windows" { winget-restore $root $config --dry-run=$dry_run }
-      if $os == "macos" { homebrew-restore $root $config --dry-run=$dry_run }
+    let system = (execute-stage $config $checkpoint system-packages {
+      mut stage_failures = 0
+      if $os == "windows" { $stage_failures += (winget-restore $root $config --dry-run=$dry_run) }
+      if $os == "macos" { $stage_failures += (homebrew-restore $root $config --dry-run=$dry_run) }
       if $os not-in [windows macos] { warning $"No native package integration for ($os)" }
+      $stage_failures
     } --dry-run=$dry_run)
-    $checkpoint = (execute-stage $config $checkpoint portable-tools {
+    $checkpoint = $system.checkpoint
+    $failures += $system.result
+    let portable = (execute-stage $config $checkpoint portable-tools {
       mise-restore $root $config --dry-run=$dry_run
     } --dry-run=$dry_run)
+    $checkpoint = $portable.checkpoint
+    $failures += $portable.result
   }
   # The macOS Finder context-menu services are machine configuration, so they
   # are restored even for offline (configuration-only) recovery.
-  $checkpoint = (execute-stage $config $checkpoint macos-finder {
+  $checkpoint = ((execute-stage $config $checkpoint macos-finder {
     finder-restore $engine_root $root $config --dry-run=$dry_run
-  } --dry-run=$dry_run)
-  $checkpoint = (execute-stage $config $checkpoint configuration {
+  } --dry-run=$dry_run) | get checkpoint)
+  $checkpoint = ((execute-stage $config $checkpoint configuration {
     chezmoi-restore $root $config --dry-run=$dry_run
     # Regenerate generated shell init code only after chezmoi applies the home
     # state, so apply cannot overwrite the loader blocks and snippets.
     homebrew-persist-env $config --dry-run=$dry_run
     if not $skip_software { mise-configure-shells $root $config --dry-run=$dry_run }
-  } --dry-run=$dry_run)
-  $checkpoint = (execute-stage $config $checkpoint snapshots {
+  } --dry-run=$dry_run) | get checkpoint)
+  $checkpoint = ((execute-stage $config $checkpoint snapshots {
     kopia-restore $config --dry-run=$dry_run
-  } --dry-run=$dry_run)
-  $checkpoint = (execute-stage $config $checkpoint verification {
+  } --dry-run=$dry_run) | get checkpoint)
+  $checkpoint = ((execute-stage $config $checkpoint verification {
     if $dry_run {
       info $"would run verification checks: (workflow-verification-tools --skip-software=$skip_software | str join ', ')"
+      0
     } else {
       workflow-verify $root $config --skip-software=$skip_software
+      0
     }
-  } --dry-run=$dry_run)
+  } --dry-run=$dry_run) | get checkpoint)
+  if $failures > 0 {
+    fail $"Package manager installs reported ($failures) failures; see the warnings above"
+  }
   info "Restore completed"
 }
 
@@ -301,14 +316,18 @@ export def workflow-update [
   git-pull $root $config --dry-run=$dry_run
   let effective = if $dry_run { $config } else { load-config $root $profiles }
   check-config $root $effective
-  winget-update $root $effective --dry-run=$dry_run
-  homebrew-update $root $effective --dry-run=$dry_run
-  mise-update $root $effective --dry-run=$dry_run
+  mut failures = 0
+  $failures += (winget-update $root $effective --dry-run=$dry_run)
+  $failures += (homebrew-update $root $effective --dry-run=$dry_run)
+  $failures += (mise-update $root $effective --dry-run=$dry_run)
   finder-restore $engine_root $root $effective --dry-run=$dry_run
   chezmoi-restore $root $effective --dry-run=$dry_run
   homebrew-persist-env $effective --dry-run=$dry_run
   mise-configure-shells $root $effective --dry-run=$dry_run
   if $dry_run { info "would run verification checks" } else { workflow-verify $root $effective }
+  if $failures > 0 {
+    fail $"Package manager updates reported ($failures) failures; see the warnings above"
+  }
   info "Managed update completed"
 }
 

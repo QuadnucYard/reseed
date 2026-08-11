@@ -223,9 +223,24 @@ install_bootstrap_tools() {
   # The mirror environment (when requested) plus NO_AUTO_UPDATE keep this
   # step off GitHub and avoid a long surprise update on a fresh install.
   if ! HOMEBREW_NO_AUTO_UPDATE=1 run_with_timeout 1800 brew install git chezmoi nushell mise; then
-    echo "Failed to install the bootstrap tools through brew. Check the network;" >&2
-    echo "if GitHub is blocked, rerun with --homebrew-mirror ustc." >&2
-    exit 1
+    # The recovery-critical tools (the offline recovery trio) must exist for
+    # the bootstrap to continue, so their install failure stops the script.
+    # A missing software-only tool (mise) is only a warning: the restore's
+    # verification stage reports it, and --skip-software does not need it.
+    missing=""
+    for command_name in git chezmoi nu; do
+      if ! command -v "$command_name" >/dev/null 2>&1; then
+        missing="$missing $command_name"
+      fi
+    done
+    if [ -n "$missing" ]; then
+      echo "Failed to install required bootstrap tools:$missing. Check the network;" >&2
+      echo "if GitHub is blocked, rerun with --homebrew-mirror ustc." >&2
+      exit 1
+    fi
+    if ! command -v mise >/dev/null 2>&1; then
+      echo "reseed: mise could not be installed; continuing without it (software-only)." >&2
+    fi
   fi
 
   if [ -n "$homebrew_mirror" ]; then

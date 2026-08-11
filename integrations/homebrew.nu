@@ -222,45 +222,54 @@ def show-homebrew-mirror [
   }
 }
 
-# Install every configured Brewfile.
+# Install every configured Brewfile. Install failures only warn; the returned
+# count lets the workflow fail with a summary at the end.
 export def homebrew-restore [
   root: path # Private state root.
   config: record # Loaded configuration.
   --dry-run # Show the installs without running them.
-] {
+]: nothing -> int {
   let settings = $config.software.homebrew
-  if not ($settings.enabled? | default false) or ((detect-os) != "macos") { return }
+  if not ($settings.enabled? | default false) or ((detect-os) != "macos") { return 0 }
   if not (command-exists brew) and not $dry_run { error make {msg: "Homebrew is required for the macOS package stage"} }
   let environment = (homebrew-env $settings)
   show-homebrew-mirror $environment
+  mut failures = 0
   for manifest in ($settings.manifests? | default []) {
     let path = ($root | path join $manifest)
     info $"installing Homebrew packages from ($manifest) ((brewfile-summary $path))"
-    run-command brew ["bundle" "install" "--verbose" $"--file=($path)"] --environment=$environment --dry-run=$dry_run | ignore
+    let result = (run-or-warn brew ["bundle" "install" "--verbose" $"--file=($path)"] --environment=$environment --dry-run=$dry_run --label=$"Homebrew install ($manifest)")
+    if $result.exit_code != 0 { $failures += 1 }
   }
+  $failures
 }
 
 # Update Homebrew and upgrade only the packages each Brewfile declares,
-# excluding the bootstrap-contract tools.
+# excluding the bootstrap-contract tools. Failures warn and are counted so the
+# workflow can exit nonzero at the end.
 export def homebrew-update [
   root: path # Private state root.
   config: record # Loaded configuration.
   --dry-run # Show the updates without running them.
-] {
+]: nothing -> int {
   let settings = $config.software.homebrew
-  if not ($settings.enabled? | default false) or not ($settings.update? | default true) or ((detect-os) != "macos") { return }
-  if not (command-exists brew) { warning "Homebrew is unavailable; skipping macOS package updates"; return }
+  if not ($settings.enabled? | default false) or not ($settings.update? | default true) or ((detect-os) != "macos") { return 0 }
+  if not (command-exists brew) { warning "Homebrew is unavailable; skipping macOS package updates"; return 0 }
   let environment = (homebrew-env $settings)
   show-homebrew-mirror $environment
-  run-command brew ["update"] --environment=$environment --dry-run=$dry_run | ignore
+  mut failures = 0
+  let updated = (run-or-warn brew ["update"] --environment=$environment --dry-run=$dry_run --label="Homebrew update")
+  if $updated.exit_code != 0 { $failures += 1 }
   for manifest in ($settings.manifests? | default []) {
     let path = ($root | path join $manifest)
     info $"installing Homebrew packages from ($manifest) ((brewfile-summary $path))"
-    run-command brew ["bundle" "install" "--verbose" $"--file=($path)"] --environment=$environment --dry-run=$dry_run | ignore
+    let result = (run-or-warn brew ["bundle" "install" "--verbose" $"--file=($path)"] --environment=$environment --dry-run=$dry_run --label=$"Homebrew install ($manifest)")
+    if $result.exit_code != 0 { $failures += 1 }
     for kind in [brews casks] {
-      upgrade-brewfile-kind $path $kind $environment --dry-run=$dry_run
+      $failures += (upgrade-brewfile-kind $path $kind $environment --dry-run=$dry_run)
     }
   }
+  $failures
 }
 
 # Parse "brew outdated" output for the requested packages into their names,
@@ -291,15 +300,16 @@ def brew-outdated-names [
 
 # Upgrade one kind of package (brews or casks) declared in a Brewfile,
 # skipping anything the bootstrap contract owns. Only packages brew reports
-# as outdated are upgraded, so the summary counts are accurate.
+# as outdated are upgraded, so the summary counts are accurate. Upgrade
+# failures warn and return 1 so the workflow can fail with a summary.
 def upgrade-brewfile-kind [
   path: path # Brewfile path.
   kind: string # "brews" or "casks".
   environment: record # Homebrew environment from the settings.
   --dry-run # Show the upgrades without running them.
-] {
+]: nothing -> int {
   let listed = (run-command brew ["bundle" "list" $"--file=($path)" $"--($kind)"] --allow-failure --environment=$environment --dry-run=$dry_run --capture)
-  if ($listed.exit_code != 0) or $dry_run { return }
+  if ($listed.exit_code != 0) or $dry_run { return 0 }
   let names = ($listed.stdout | lines | each {|line| $line | str trim } | compact)
   let ignored_names = (bootstrap-brew-items
     | parse --regex '^(?:brew|cask)\s+"(?<name>[^"]+)"'
@@ -308,16 +318,20 @@ def upgrade-brewfile-kind [
   let names = ($names | where {|name| $name not-in $ignored_names })
   if ($names | is-not-empty) {
     let outdated = (brew-outdated-names $environment $kind $names)
-    if ($outdated | is-empty) { return }
+    if ($outdated | is-empty) { return 0 }
     let args = if $kind == "casks" { ["upgrade" "--cask"] | append $outdated } else { ["upgrade"] | append $outdated }
     info $"upgrading ($outdated | length) ($kind)"
     let upgraded = (run-command brew $args --allow-failure --environment=$environment)
     if $upgraded.exit_code != 0 {
       let stderr = ($upgraded.stderr | str trim)
       warning (if ($stderr | is-empty) { $"Some Homebrew ($kind) updates failed" } else { $"Some Homebrew ($kind) updates failed: ($stderr)" })
+      1
     } else {
       info $"upgraded ($outdated | length) ($kind)"
+      0
     }
+  } else {
+    0
   }
 }
 

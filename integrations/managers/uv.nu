@@ -65,13 +65,20 @@ export def uv-entries [
 
 # Install or upgrade one uv tool through mise exec. --upgrade makes the
 # command idempotent and also refreshes an installed tool of the same name.
+# A failed install warns and returns 1 so the workflow can fail with a
+# summary at the end.
 def run-uv-package [
   root: path # Private state root.
   config: record # Loaded configuration.
   package: string # Specifier to install.
   --dry-run # Show the command without running it.
-] {
-  run-mise-managed $root $config "uv" ["tool" "install" "--upgrade" $package] "mise is required for the configured uv tools" --dry-run=$dry_run | ignore
+]: nothing -> int {
+  let result = (run-mise-managed $root $config "uv" ["tool" "install" "--upgrade" $package] "mise is required for the configured uv tools" --dry-run=$dry_run --allow-failure)
+  if $result.exit_code != 0 {
+    warning $"uv failed to install ($package) with exit code ($result.exit_code); continuing"
+    return 1
+  }
+  0
 }
 
 # Install every configured uv tool.
@@ -79,12 +86,14 @@ export def uv-restore [
   root: path # Private state root.
   config: record # Loaded configuration.
   --dry-run # Show the installs without running them.
-] {
+]: nothing -> int {
   let configured = (manager-settings $config uv)
-  if not ($configured.enabled? | default false) { return }
+  if not ($configured.enabled? | default false) { return 0 }
+  mut failures = 0
   for package in (uv-packages $root $config) {
-    run-uv-package $root $config $package --dry-run=$dry_run
+    $failures += (run-uv-package $root $config $package --dry-run=$dry_run)
   }
+  $failures
 }
 
 # Upgrade every configured uv tool.
@@ -92,16 +101,18 @@ export def uv-update [
   root: path # Private state root.
   config: record # Loaded configuration.
   --dry-run # Show the upgrades without running them.
-] {
+]: nothing -> int {
   let configured = (manager-settings $config uv)
-  if not ($configured.enabled? | default false) or not ($configured.update? | default true) { return }
+  if not ($configured.enabled? | default false) or not ($configured.update? | default true) { return 0 }
   if not $dry_run and not (command-exists mise) {
     warning "mise is unavailable; skipping uv tool updates"
-    return
+    return 0
   }
+  mut failures = 0
   for package in (uv-packages $root $config) {
-    run-uv-package $root $config $package --dry-run=$dry_run
+    $failures += (run-uv-package $root $config $package --dry-run=$dry_run)
   }
+  $failures
 }
 
 # Parse "uv tool list --show-version-specifiers" output ("name v1.2.3" lines)

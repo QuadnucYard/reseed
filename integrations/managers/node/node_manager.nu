@@ -145,7 +145,7 @@ def require-yarn-global [
   }
   let major = (node-yarn-major-version $result.stdout)
   if $major >= 2 {
-    error make {msg: $"Reseed's Yarn integration requires Yarn 1 (the 'yarn global' commands), but Yarn ($major) was found; pin Yarn 1.x in the mise config"}
+    error make {msg: $"Reseed's Yarn integration requires Yarn 1, which provides the 'yarn global' commands, but Yarn ($major) was found; pin Yarn 1.x in the mise config"}
   }
 }
 
@@ -163,38 +163,52 @@ def run-node-manager [
   run-mise-managed $root $config $manager $args $"mise is required for configured ($manager) globals" --dry-run=$dry_run --allow-failure=$allow_failure --capture=$capture
 }
 
-# Install every configured global package for a Node manager.
+# Install every configured global package for a Node manager. A failed
+# install warns and is counted so the workflow can fail with a summary.
 export def node-manager-restore [
   root: path # Private state root.
   config: record # Loaded configuration.
   manager: string # Manager name.
   --dry-run # Show the installs without running them.
-] {
+]: nothing -> int {
   let configured = (settings $config $manager)
-  if not ($configured.enabled? | default false) { return }
+  if not ($configured.enabled? | default false) { return 0 }
   require-yarn-global $root $config $manager --dry-run=$dry_run
+  mut failures = 0
   for package in (node-manager-entries $root $config $manager) {
-    run-node-manager $root $config $manager (node-manager-install-args $manager $package.spec) --dry-run=$dry_run | ignore
+    let result = (run-node-manager $root $config $manager (node-manager-install-args $manager $package.spec) --dry-run=$dry_run --allow-failure)
+    if $result.exit_code != 0 {
+      warning $"($manager) failed to install ($package.spec) with exit code ($result.exit_code); continuing"
+      $failures += 1
+    }
   }
+  $failures
 }
 
-# Update every configured global package for a Node manager.
+# Update every configured global package for a Node manager. A failed update
+# warns and is counted so the workflow can fail with a summary.
 export def node-manager-update [
   root: path # Private state root.
   config: record # Loaded configuration.
   manager: string # Manager name.
   --dry-run # Show the updates without running them.
-] {
+]: nothing -> int {
   let configured = (settings $config $manager)
-  if not ($configured.enabled? | default false) or not ($configured.update? | default true) { return }
+  if not ($configured.enabled? | default false) or not ($configured.update? | default true) { return 0 }
   if not $dry_run and not (command-exists mise) {
     warning $"mise is unavailable; skipping ($manager) global updates"
-    return
+    return 0
   }
   require-yarn-global $root $config $manager --dry-run=$dry_run
+  mut failures = 0
   for package in (node-manager-entries $root $config $manager) {
-    run-node-manager $root $config $manager (node-manager-update-args $manager $package) --dry-run=$dry_run | ignore
+    let result = (run-node-manager $root $config $manager (node-manager-update-args $manager $package) --dry-run=$dry_run --allow-failure)
+    if $result.exit_code != 0 {
+      warning $"($manager) failed to update ($package.spec) with exit code ($result.exit_code); continuing"
+      $failures += 1
+    }
   }
+  $failures
 }
 
 # Parse a dependency inventory (pnpm --json or bun JSON output) into

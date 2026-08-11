@@ -43,37 +43,43 @@ export def winget-status [
 }
 
 # Import every configured WinGet manifest, ignoring unavailable packages and
-# version mismatches so a partial import still completes.
+# version mismatches so a partial import still completes. Import failures only
+# warn; the returned count lets the workflow fail with a summary at the end.
 export def winget-restore [
   root: path # Private state root.
   config: record # Loaded configuration.
   --dry-run # Show the imports without running them.
-] {
+]: nothing -> int {
   let settings = $config.software.winget
-  if not ($settings.enabled? | default false) or ((detect-os) != "windows") { return }
+  if not ($settings.enabled? | default false) or ((detect-os) != "windows") { return 0 }
   if not (command-exists winget) and not $dry_run { error make {msg: "WinGet is required for the Windows package stage"} }
+  mut failures = 0
   for manifest in ($settings.manifests? | default []) {
     let path = ($root | path join $manifest)
-    run-command winget [
+    let result = (run-or-warn winget [
       "import" "--import-file" ($path | into string) "--ignore-unavailable"
       "--ignore-versions" "--accept-source-agreements" "--accept-package-agreements"
       "--disable-interactivity"
-    ] --dry-run=$dry_run | ignore
+    ] --dry-run=$dry_run --label=$"WinGet import ($manifest)")
+    if $result.exit_code != 0 { $failures += 1 }
   }
+  $failures
 }
 
 # Upgrade every curated package in the configured manifests. A nonzero exit
 # is tolerated when WinGet reports nothing to upgrade or the package is
-# absent from the system.
+# absent from the system; other failures warn and are counted so the
+# workflow can exit nonzero at the end.
 export def winget-update [
   root: path # Private state root.
   config: record # Loaded configuration.
   --dry-run # Show the upgrades without running them.
-] {
+]: nothing -> int {
   let settings = $config.software.winget
-  if not ($settings.enabled? | default false) or not ($settings.update? | default true) or ((detect-os) != "windows") { return }
-  if not (command-exists winget) and not $dry_run { warning "WinGet is unavailable; skipping Windows package updates"; return }
+  if not ($settings.enabled? | default false) or not ($settings.update? | default true) or ((detect-os) != "windows") { return 0 }
+  if not (command-exists winget) and not $dry_run { warning "WinGet is unavailable; skipping Windows package updates"; return 0 }
   let ids = ($settings.manifests? | default [] | each {|manifest| native-winget-manifest-ids ($root | path join $manifest) } | flatten | uniq | sort)
+  mut failures = 0
   for id in $ids {
     let result = (run-command winget [
       "upgrade" "--id" $id "--exact" "--accept-source-agreements"
@@ -81,8 +87,10 @@ export def winget-update [
     ] --dry-run=$dry_run --allow-failure --capture)
     if ($result.exit_code != 0) and not (($result.stdout | str lowercase) =~ 'no applicable upgrade|no available upgrade|no installed package') {
       warning $"WinGet could not update ($id): ($result.stderr | str trim)"
+      $failures += 1
     }
   }
+  $failures
 }
 
 # Remove the bootstrap-contract package identifiers from a WinGet export

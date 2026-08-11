@@ -46,16 +46,22 @@ export def cargo-binstall-args [
 }
 
 # Run cargo-binstall through mise exec with the shared managed-tools
-# environment.
+# environment. A failed install warns and returns 1 so the workflow can fail
+# with a summary at the end.
 def run-binstall [
   root: path # Private state root.
   config: record # Loaded configuration.
   packages: list<string> # Crates to install.
   --update # Reinstall over existing binaries.
   --dry-run # Show the command without running it.
-] {
+]: nothing -> int {
   let install_root = (managed-bin-dir | path dirname)
-  run-mise-managed $root $config "cargo-binstall" (cargo-binstall-args $install_root $packages --update=$update) "mise is required for the configured Cargo packages" --dry-run=$dry_run | ignore
+  let result = (run-mise-managed $root $config "cargo-binstall" (cargo-binstall-args $install_root $packages --update=$update) "mise is required for the configured Cargo packages" --dry-run=$dry_run --allow-failure)
+  if $result.exit_code != 0 {
+    warning $"cargo-binstall failed to install Cargo packages with exit code ($result.exit_code); continuing"
+    return 1
+  }
+  0
 }
 
 # Install every configured Cargo crate.
@@ -63,11 +69,11 @@ export def cargo-binstall-restore [
   root: path # Private state root.
   config: record # Loaded configuration.
   --dry-run # Show the installs without running them.
-] {
+]: nothing -> int {
   let configured = (settings $config)
-  if not ($configured.enabled? | default false) { return }
+  if not ($configured.enabled? | default false) { return 0 }
   let packages = (cargo-binstall-packages $root $config)
-  if ($packages | is-empty) { return }
+  if ($packages | is-empty) { return 0 }
   run-binstall $root $config $packages --dry-run=$dry_run
 }
 
@@ -76,14 +82,14 @@ export def cargo-binstall-update [
   root: path # Private state root.
   config: record # Loaded configuration.
   --dry-run # Show the upgrades without running them.
-] {
+]: nothing -> int {
   let configured = (settings $config)
-  if not ($configured.enabled? | default false) or not ($configured.update? | default true) { return }
+  if not ($configured.enabled? | default false) or not ($configured.update? | default true) { return 0 }
   let packages = (cargo-binstall-packages $root $config)
-  if ($packages | is-empty) { return }
+  if ($packages | is-empty) { return 0 }
   if not $dry_run and not (command-exists mise) {
     warning "mise is unavailable; skipping Cargo binary updates"
-    return
+    return 0
   }
   run-binstall $root $config $packages --update --dry-run=$dry_run
 }
