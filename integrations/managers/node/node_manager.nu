@@ -307,7 +307,7 @@ def inventory-output [
   manager: string # Manager name.
 ]: nothing -> record {
   let args = match $manager {
-    pnpm => [list --global --depth 0 --json]
+    pnpm => [list --global --depth "0" --json]
     yarn => [global list --json]
     bun => [pm ls --global --json]
   }

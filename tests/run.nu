@@ -44,6 +44,10 @@ def test-config-layer [
   assert eq (scrub-url "https://example.com/repo") "https://example.com/repo" "URLs without credentials are unchanged"
   assert eq (scrub-url "ssh://git@example.com/repo") "ssh://***@example.com/repo" "SSH URLs with userinfo are redacted"
   assert eq (show-command git ["clone" "https://user:token@example.com/repo"]) "git clone https://***@example.com/repo" "command display redacts credentials"
+  # expand-home normalizes separators so tools that compare paths against PATH
+  # (e.g. pnpm's global bin directory check) see one consistent platform form.
+  let normalized_home = (($nu.home-dir | path join ".local" "share" "reseed" "bin") | path expand --no-symlink | into string)
+  assert eq ((expand-home "~/.local/share/reseed/bin" | into string)) $normalized_home "expand-home normalizes platform separators"
   let missing_command = (run-command "reseed-no-such-command" [] --allow-failure --quiet)
   assert eq $missing_command.exit_code 127 "missing executables stream a normalized failure"
   let missing_captured = (run-command "reseed-no-such-command" [] --allow-failure --quiet --capture)

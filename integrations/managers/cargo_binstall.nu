@@ -162,15 +162,21 @@ export def cargo-binstall-verify [
   let configured = (settings $config)
   if not ($configured.enabled? | default false) { return [] }
   let packages = (cargo-binstall-packages $root $config)
+  # Probe with -V: cargo-binstall's --version flag takes the crate version to
+  # install, so "--version" alone exits 2 and would report a false negative.
   let executable = (try {
-    run-mise-managed $root $config "cargo-binstall" ["--version"] "mise is required for the configured Cargo packages" --allow-failure --capture
+    run-mise-managed $root $config "cargo-binstall" ["-V"] "mise is required for the configured Cargo packages" --allow-failure --capture
   } catch {|error|
     {exit_code: 127 stdout: "" stderr: ($error.msg? | default "failed to start mise")}
   })
   mut results = [{
     check: "cargo-binstall executable"
     ok: ($executable.exit_code == 0)
-    detail: "required for configured Cargo binaries"
+    detail: (if ($executable.exit_code == 0) {
+      "required for configured Cargo binaries"
+    } else {
+      $"cargo-binstall is unavailable: (($executable.stderr | str trim) | default 'command not found')"
+    })
   }]
   let installed = (installed-cargo-packages $root $config)
   let missing = if $installed.available {

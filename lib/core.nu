@@ -37,17 +37,21 @@ export def fail [
 }
 
 # Expand a leading ~ or ~/ or ~\ to the home directory; other values are
-# expanded without resolving symlinks.
+# expanded without resolving symlinks. The result is always normalized to the
+# platform separator, because "path join" keeps the separators of its argument
+# (a "~/.local/share/..." string yields mixed \ and / on Windows) and tools
+# such as pnpm compare paths string-wise against PATH entries.
 export def expand-home [
   value: string # Path that may start with ~.
 ]: nothing -> path {
-  if $value == "~" {
+  let expanded = if $value == "~" {
     $nu.home-dir
   } else if ($value | str starts-with "~/") or ($value | str starts-with "~\\") {
     $nu.home-dir | path join ($value | str substring 2..)
   } else {
-    $value | path expand --no-symlink
+    $value
   }
+  $expanded | path expand --no-symlink
 }
 
 # Redact the userinfo of URLs so credentials never appear in logs or errors.
