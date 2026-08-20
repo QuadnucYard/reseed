@@ -3,7 +3,7 @@
 
 use std assert
 use ./helpers.nu ["assert eq" "assert ne"]
-use ../lib/setup.nu [admin-key-path admin-keys-command gpg-batch-file jj-signing-behaviors parse-gh-scopes parse-gpg-secret-ids setup-plan ssh-config-merge]
+use ../lib/setup.nu [admin-key-path admin-keys-command gpg-batch-file jj-signing-behaviors normalize-ssh-host parse-gh-scopes parse-gpg-secret-ids setup-plan setup-hosts ssh-config-merge ssh-host-duplicate ssh-hosts-empty ssh-hosts-source-update]
 
 # Purpose planning: step selection, dependency closure, ordering, and
 # deduplication of shared steps.
@@ -107,6 +107,25 @@ def test-ssh-config-merge [] {
   assert eq $twice $merged "ssh config merge is idempotent"
 }
 
+def test-ssh-host-helpers [] {
+  let empty = {setup: {ssh: {hosts: []}}}
+  assert (ssh-hosts-empty $empty) "empty SSH host configuration is detected"
+  let candidate = (normalize-ssh-host " alice " "Example.COM" 2222 true windows)
+  assert eq $candidate {user: alice host: Example.COM port: 2222 admin: true os: windows} "SSH host normalization"
+  assert (ssh-host-duplicate {setup: {ssh: {hosts: [{user: bob host: example.com port: 2222}]}}} $candidate) "duplicate host and port detection ignores case"
+  assert (not (ssh-host-duplicate {setup: {ssh: {hosts: [{user: bob host: example.com port: 22}]}}} $candidate)) "different SSH ports are allowed"
+
+  let source = "{\n # preserve this comment\n setup: {\n  ssh: {\n   # preserve host docs\n   hosts: []\n  }\n }\n}\n"
+  let updated = (ssh-hosts-source-update $source ($source | from nuon) [(normalize-ssh-host alice example.com)])
+  assert ($updated | str contains "preserve this comment") "source update preserves surrounding comments"
+  assert ($updated | str contains "host: \"example.com\"") "source update writes the new host"
+  assert eq (($updated | from nuon).setup.ssh.hosts.0.host) example.com "source update remains valid NUON"
+
+  let minimal = "{schema: 1}\n"
+  let expanded = (ssh-hosts-source-update $minimal ($minimal | from nuon) [(normalize-ssh-host alice example.com)])
+  assert eq (($expanded | from nuon).setup.ssh.hosts.0.user) alice "source update creates missing setup sections"
+}
+
 # Admin allow list paths and upload commands per host operating system.
 def test-admin-key-handling [] {
   assert eq (admin-key-path windows) "C:\\ProgramData\\ssh\\administrators_authorized_keys" "windows admin key path"
@@ -144,6 +163,7 @@ def main [] {
   test-gh-scope-parsing
   test-gpg-colons-parsing
   test-ssh-config-merge
+  test-ssh-host-helpers
   test-admin-key-handling
   test-gpg-batch-file
   test-jj-signing-behaviors

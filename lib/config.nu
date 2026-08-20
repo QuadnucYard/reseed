@@ -480,7 +480,7 @@ def validate-manager-manifest [
 # Validate the optional setup section: SSH host entries must carry a user and
 # host, with optional numeric port, boolean admin flag, and a supported
 # host operating system.
-def validate-setup [
+export def validate-setup [
   config: record # Loaded configuration.
 ]: nothing -> list<record> {
   let hosts = ((($config.setup? | default {}).ssh? | default {}).hosts? | default null)

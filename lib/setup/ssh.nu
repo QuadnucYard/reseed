@@ -2,7 +2,7 @@
 # host key installation (including the admin allow list), ssh config
 # entries, and connectivity tests.
 
-use ../core.nu [command-exists detect-os expand-home run-command]
+use ../core.nu [command-exists detect-os expand-home run-command info warning]
 use ./shared.nu [machine-name ssh-agent-running ssh-key-status]
 use ./git.nu [git-config-get]
 
@@ -19,7 +19,7 @@ export def github-has-ssh-key []: nothing -> bool {
 }
 
 # Normalized configured host entries.
-def setup-hosts [config: record]: nothing -> list<record> {
+export def setup-hosts [config: record]: nothing -> list<record> {
   let hosts = ((($config.setup? | default {}).ssh? | default {}).hosts? | default [])
   $hosts | each {|host| {
     user: ($host.user? | default "")
@@ -28,6 +28,80 @@ def setup-hosts [config: record]: nothing -> list<record> {
     admin: ($host.admin? | default false)
     os: ($host.os? | default "unix")
   }}
+}
+
+# True when no remote SSH hosts are configured.
+export def ssh-hosts-empty [config: record]: nothing -> bool {
+  (setup-hosts $config | is-empty)
+}
+
+# Normalize one host record for storage and comparison.
+export def normalize-ssh-host [user: string, host: string, port: int = 22, admin: bool = false, os: string = "unix"]: nothing -> record {
+  {user: ($user | str trim) host: ($host | str trim) port: $port admin: $admin os: ($os | str lowercase | str trim)}
+}
+
+# Whether a host with the same hostname and port is already configured.
+export def ssh-host-duplicate [config: record, candidate: record]: nothing -> bool {
+  let hostname = ($candidate.host | str lowercase)
+  let port = $candidate.port
+  (setup-hosts $config | any {|host| (($host.host | str lowercase) == $hostname) and $host.port == $port })
+}
+
+def container-end [tokens: table, start: int, shape: string, opener: string, closer: string]: nothing -> int {
+  mut depth = 0
+  for row in ($tokens | enumerate | skip $start) {
+    if ($row.item.shape | into string) != $shape { continue }
+    let content = ($row.item.content | str trim)
+    if ($content | str starts-with $opener) { $depth += 1 }
+    if ($content | str ends-with $closer) { $depth -= 1 }
+    if $depth == 0 { return $row.item.span.end }
+  }
+  -1
+}
+
+def key-value-span [tokens: table, key: string, start: int = 0, end: int = 9223372036854775807]: nothing -> any {
+  let key_row = ($tokens | enumerate | where {|row|
+    $row.item.shape == shape_string and $row.item.content == $key and $row.item.span.start >= $start and $row.item.span.end <= $end
+  } | get -o 0)
+  if $key_row == null { return null }
+  let value_row = ($tokens | enumerate | skip ($key_row.index + 1) | where {|row|
+    let content = ($row.item.content | str trim)
+    ($row.item.shape == shape_list and ($content | str starts-with "[")) or ($row.item.shape == shape_record and ($content | str starts-with "{"))
+  } | get -o 0)
+  if $value_row == null { return null }
+  let shape = ($value_row.item.shape | into string)
+  let bounds = if $shape == "shape_list" {
+    {end: (container-end $tokens $value_row.index shape_list "[" "]")}
+  } else {
+    {end: (container-end $tokens $value_row.index shape_record "{" "}")}
+  }
+  {start: $value_row.item.span.start end: $bounds.end index: $value_row.index shape: $shape}
+}
+
+# Replace the parsed `setup.ssh.hosts` value while retaining all other source
+# text, including comments. Missing sections fall back to a valid NUON rewrite.
+export def ssh-hosts-source-update [source: string, config: record, hosts: list<record>]: nothing -> string {
+  let updated = ($config | upsert setup ( (($config.setup? | default {}) | upsert ssh ((($config.setup?.ssh? | default {}) | upsert hosts $hosts))) ))
+  let tokens = (ast $source --flatten)
+  let setup = (key-value-span $tokens setup)
+  let rendered = ($hosts | each {|host| $host | to nuon } | str join "\n" | prepend "[" | append "]" | str join "\n")
+  if $setup == null {
+    let root_end = (container-end $tokens 0 shape_record "{" "}")
+    if $root_end < 1 { return ($updated | to nuon --indent 2) }
+    return (($source | str substring 0..($root_end - 2)) + $"\n  setup: {ssh: {hosts: ($rendered)}}" + ($source | str substring ($root_end - 1)..))
+  }
+  if $setup.shape != "shape_record" { return ($updated | to nuon --indent 2) }
+  let ssh = (key-value-span $tokens ssh $setup.start $setup.end)
+  if $ssh == null {
+    return (($source | str substring 0..($setup.end - 2)) + $"\n    ssh: {hosts: ($rendered)}" + ($source | str substring ($setup.end - 1)..))
+  }
+  if $ssh.shape != "shape_record" { return ($updated | to nuon --indent 2) }
+  let span = (key-value-span $tokens hosts $ssh.start $ssh.end)
+  if $span == null {
+    return (($source | str substring 0..($ssh.end - 2)) + $"\n      hosts: ($rendered)" + ($source | str substring ($ssh.end - 1)..))
+  }
+  if $span.shape != "shape_list" { return ($updated | to nuon --indent 2) }
+  ($source | str substring 0..($span.start - 1)) + $rendered + ($source | str substring $span.end..)
 }
 
 # "user@host" target string.

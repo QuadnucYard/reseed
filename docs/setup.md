@@ -16,6 +16,9 @@ nu reseed.nu setup identity
 nu reseed.nu setup ssh-local
 nu reseed.nu setup ssh-remote
 nu reseed.nu setup ssh
+
+# Add a remote host to setup.ssh.hosts.
+nu reseed.nu setup ssh-host add
 nu reseed.nu setup gh
 nu reseed.nu setup gpg
 ```
@@ -66,6 +69,25 @@ jj and GPG are optional features that default to on:
 
 `--no-jj` and `--no-gpg` force the features off without asking, for
 automation.
+
+## Adding SSH hosts
+
+When no remote hosts are configured, SSH remote/configuration/test steps are
+skipped with a hint instead of being silently marked complete. Add a host with:
+
+```powershell
+nu reseed.nu setup ssh-host add
+```
+
+The command prompts for omitted user, hostname, port, admin access, and host OS;
+their offered defaults are port `22`, non-admin, and `unix`. It then shows the
+normalized record and asks for confirmation. Use `--user`, `--host`, `--port`,
+`--os`, and `--admin` or `--no-admin` for scripted input; `--yes` accepts omitted
+defaults and the final confirmation. `--dry-run` previews without writing. A
+hostname and port may only be added once, ignoring hostname case. Hosts are
+stored in the base `config/recovery.nuon`; the command refuses to write when an
+active profile overrides `setup.ssh.hosts`, because that profile would hide the
+new entry.
 
 ## GitHub uploads
 

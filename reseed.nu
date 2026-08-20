@@ -4,7 +4,7 @@ use lib/config.nu [load-config parse-profiles]
 use lib/core.nu [expand-home fail scrub-url]
 use lib/git.nu [git-sync]
 use lib/repo.nu [repo-merge-abort repo-merge-continue]
-use lib/setup.nu [setup-wizard]
+use lib/setup.nu [setup-wizard setup-ssh-host-add]
 use lib/workflow.nu [workflow-backup workflow-bundle workflow-init workflow-plan workflow-reconcile workflow-restore workflow-status workflow-summary workflow-sync workflow-update workflow-verify]
 use integrations/finder.nu [finder-restore finder-status finder-verify]
 
@@ -278,6 +278,24 @@ def "main setup ssh-remote" [
 ] {
   let state = (resolved-state-root $state_root)
   setup-wizard $state (resolved-config $state $profiles) ssh-remote --yes=$yes --dry-run=$dry_run --no-jj=$no_jj
+}
+
+# Add one remote SSH host to the base recovery configuration.
+def "main setup ssh-host add" [
+  --profiles (-p): string = "" # Comma-separated profile names.
+  --state-root (-s): string = "" # Private state directory.
+  --user: string = "" # SSH login user; prompts when omitted.
+  --host: string = "" # SSH hostname; prompts when omitted.
+  --port: int # SSH port; prompts when omitted (default 22).
+  --admin # Also install the key in the host admin allow list.
+  --no-admin # Do not install the key in the host admin allow list.
+  --os: string # Host OS; prompts when omitted (default unix).
+  --yes (-y) # Accept the final add confirmation.
+  --dry-run # Show the normalized host without writing.
+] {
+  let state = (resolved-state-root $state_root)
+  let config = (resolved-config $state $profiles)
+  setup-ssh-host-add $state $config --user=$user --host=$host --port=$port --admin=$admin --no-admin=$no_admin --os=$os --yes=$yes --dry-run=$dry_run | ignore
 }
 
 # Set up local SSH keys, remote hosts, and connectivity tests.
