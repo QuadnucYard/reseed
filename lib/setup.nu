@@ -20,7 +20,7 @@ use setup/shared.nu [
   ssh-agent-running
   ssh-key-status
 ]
-use setup/git.nu [git-config-get git-signing-configured identity-present]
+use setup/git.nu [git-config-get git-signing-configured identity-present setup-gpg-git]
 use setup/jj.nu [jj-signing-configured setup-jj-prereq setup-gpg-jj]
 use setup/common.nu [setup-gh-auth setup-identity]
 use setup/provider.nu [repo-transport-check setup-gh-credential-helper setup-gh-repo-probe]

@@ -123,6 +123,10 @@ export def setup-gpg-verify [
   --dry-run # Report the verification instead of running it.
 ]: nothing -> record {
   if $dry_run { return {step: gpg-verify ok: true detail: "would verify a signed commit"} }
+  let key_id = (gpg-secret-key-id)
+  if ($key_id | is-empty) {
+    return {step: gpg-verify ok: false detail: "no GPG secret key available for signing"}
+  }
   let scratch = (mktemp --directory)
   run-command git ["-C" ($scratch | into string) "init" "-b" "main"] --quiet | ignore
   let name = (git-config-get "user.name")
@@ -131,6 +135,7 @@ export def setup-gpg-verify [
     "-C" ($scratch | into string)
     "-c" $"user.name=($name)"
     "-c" $"user.email=($email)"
+    "-c" $"user.signingkey=($key_id)"
     "commit" "--allow-empty" "-S" "-m" "reseed signature verification"
   ] --allow-failure --quiet --capture)
   if $committed.exit_code != 0 {
