@@ -285,7 +285,8 @@ def "main setup ssh-host add" [
   --profiles (-p): string = "" # Comma-separated profile names.
   --state-root (-s): string = "" # Private state directory.
   --user: string = "" # SSH login user; prompts when omitted.
-  --host: string = "" # SSH hostname; prompts when omitted.
+  --host: string = "" # Network hostname or address; prompts when omitted.
+  --name: string # SSH Host name/alias; defaults to --host.
   --port: int # SSH port; prompts when omitted (default 22).
   --admin # Also install the key in the host admin allow list.
   --no-admin # Do not install the key in the host admin allow list.
@@ -295,7 +296,7 @@ def "main setup ssh-host add" [
 ] {
   let state = (resolved-state-root $state_root)
   let config = (resolved-config $state $profiles)
-  setup-ssh-host-add $state $config --user=$user --host=$host --port=$port --admin=$admin --no-admin=$no_admin --os=$os --yes=$yes --dry-run=$dry_run | ignore
+  setup-ssh-host-add $state $config --user=$user --host=$host --name=$name --port=$port --admin=$admin --no-admin=$no_admin --os=$os --yes=$yes --dry-run=$dry_run | ignore
 }
 
 # Set up local SSH keys, remote hosts, and connectivity tests.

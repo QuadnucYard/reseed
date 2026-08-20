@@ -22,6 +22,7 @@ export def github-has-ssh-key []: nothing -> bool {
 export def setup-hosts [config: record]: nothing -> list<record> {
   let hosts = ((($config.setup? | default {}).ssh? | default {}).hosts? | default [])
   $hosts | each {|host| {
+    name: ($host.name? | default ($host.host? | default ""))
     user: ($host.user? | default "")
     host: ($host.host? | default "")
     port: ($host.port? | default 22)
@@ -36,8 +37,10 @@ export def ssh-hosts-empty [config: record]: nothing -> bool {
 }
 
 # Normalize one host record for storage and comparison.
-export def normalize-ssh-host [user: string, host: string, port: int = 22, admin: bool = false, os: string = "unix"]: nothing -> record {
-  {user: ($user | str trim) host: ($host | str trim) port: $port admin: $admin os: ($os | str lowercase | str trim)}
+export def normalize-ssh-host [user: string, host: string, port: int = 22, admin: bool = false, os: string = "unix", name: string = ""]: nothing -> record {
+  let address = ($host | str trim)
+  let alias = ($name | str trim)
+  {name: (if ($alias | is-empty) { $address } else { $alias }) user: ($user | str trim) host: $address port: $port admin: $admin os: ($os | str lowercase | str trim)}
 }
 
 # Whether a host with the same hostname and port is already configured.
@@ -45,6 +48,11 @@ export def ssh-host-duplicate [config: record, candidate: record]: nothing -> bo
   let hostname = ($candidate.host | str lowercase)
   let port = $candidate.port
   (setup-hosts $config | any {|host| (($host.host | str lowercase) == $hostname) and $host.port == $port })
+}
+
+export def ssh-host-name-duplicate [config: record, candidate: record]: nothing -> bool {
+  let name = ($candidate.name | str lowercase)
+  (setup-hosts $config | any {|host| ($host.name | str lowercase) == $name })
 }
 
 def container-end [tokens: table, start: int, shape: string, opener: string, closer: string]: nothing -> int {
@@ -153,13 +161,14 @@ export def hosts-in-ssh-config [config: record]: nothing -> bool {
   let path = (ssh-config-path)
   if not ($path | path exists) { return false }
   let existing = (open --raw $path)
-  (setup-hosts $config | all {|host| ($existing | lines | any {|line| ($line | str trim) == $"Host ($host.host)" }) })
+  (setup-hosts $config | all {|host| ($existing | lines | any {|line| ($line | str trim) == $"Host ($host.name)" }) })
 }
 
 # Generated Host block for one host entry.
 def ssh-config-block [host: record]: nothing -> string {
   let port = ($host.port? | default 22)
-  [$"Host ($host.host)" $"HostName ($host.host)" $"User ($host.user)"]
+  let name = ($host.name? | default $host.host)
+  [$"Host ($name)" $"HostName ($host.host)" $"User ($host.user)"]
     | append (if $port == 22 { [] } else { [$"Port ($port)"] })
     | str join "\n"
 }
@@ -170,7 +179,8 @@ export def ssh-config-merge [existing: string, hosts: list<record>]: nothing -> 
   let lines = ($existing | lines)
   mut parts = [$existing]
   for host in $hosts {
-    if ($lines | any {|line| ($line | str trim) == $"Host ($host.host)" }) { continue }
+    let name = ($host.name? | default $host.host)
+    if ($lines | any {|line| ($line | str trim) == $"Host ($name)" }) { continue }
     $parts = ($parts | append (ssh-config-block $host))
   }
   $parts
@@ -351,9 +361,9 @@ export def ssh-install-failure [host: record, result: record, target: string]: n
   let lower = ($output | str lowercase)
   let reason = if ($lower | str contains "permission denied (") or ($lower | str contains "permission denied, please try again") or ($lower | str contains "authentication failed") {
     "SSH authentication failed; enable password or keyboard-interactive login for the initial key installation"
-  } else if ($lower | str contains "permission denied") or ($lower | str contains "access is denied") or ($lower | str contains "unauthorizedaccess") {
+  } else if ($lower | str contains "permission denied") or ($lower | str contains "access is denied") or ($lower | str contains "access to the path") or ($lower | str contains "unauthorizedaccess") {
     if $host.os == "windows" and $host.admin {
-      "permission denied; the Windows SSH account needs an elevated token to update C:\\ProgramData\\ssh"
+      "permission denied; remote installation is impossible without an elevated token for the Windows SSH account or another privileged session/tool that can update C:\\ProgramData\\ssh"
     } else {
       "permission denied while updating the remote key file"
     }

@@ -31,6 +31,7 @@ use setup/ssh.nu [
   normalize-ssh-host
   setup-hosts
   ssh-host-duplicate
+  ssh-host-name-duplicate
   ssh-hosts-empty
   ssh-hosts-source-update
   hosts-keys-installed
@@ -53,7 +54,7 @@ use setup/gpg.nu [
 # entrypoints and tests import them from here).
 export use setup/plan.nu [setup-plan]
 export use setup/shared.nu [parse-gh-scopes parse-gpg-secret-ids]
-export use setup/ssh.nu [admin-key-path admin-keys-command normalize-ssh-host setup-hosts ssh-config-merge ssh-host-duplicate ssh-hosts-empty ssh-hosts-source-update ssh-install-args ssh-install-failure ssh-verification-args user-keys-command windows-admin-keys-script windows-user-keys-script]
+export use setup/ssh.nu [admin-key-path admin-keys-command normalize-ssh-host setup-hosts ssh-config-merge ssh-host-duplicate ssh-host-name-duplicate ssh-hosts-empty ssh-hosts-source-update ssh-install-args ssh-install-failure ssh-verification-args user-keys-command windows-admin-keys-script windows-user-keys-script]
 export use setup/gpg.nu [gpg-batch-file]
 export use setup/jj.nu [jj-signing-behaviors]
 export use setup/provider.nu [parse-repo-url provider-descriptor repo-transport-check setup-gh-credential-helper setup-gh-repo-probe]
@@ -131,6 +132,7 @@ export def setup-ssh-host-add [
   config: record
   --user: string = ""
   --host: string = ""
+  --name: string
   --port: int
   --admin
   --no-admin
@@ -153,6 +155,13 @@ export def setup-ssh-host-add [
   if $admin and $no_admin { fail "--admin and --no-admin are mutually exclusive" }
   let user = if ($user | str trim | is-empty) { input "SSH user: " | str trim } else { $user | str trim }
   let host = if ($host | str trim | is-empty) { input "SSH host: " | str trim } else { $host | str trim }
+  let name_value = if $name != null and not ($name | str trim | is-empty) {
+    $name | str trim
+  } else if $yes {
+    $host
+  } else {
+    input --default $host $"SSH host name/alias [($host)]: " | str trim
+  }
   let port_value = if $port != null {
     $port
   } else if $yes {
@@ -178,11 +187,14 @@ export def setup-ssh-host-add [
   }
   if ($user | is-empty) { fail "SSH user must not be empty" }
   if ($host | is-empty) { fail "SSH host must not be empty" }
+  if ($name_value | is-empty) { fail "SSH host name must not be empty" }
   if $port_value < 1 or $port_value > 65535 { fail "SSH port must be between 1 and 65535" }
   if $os_value not-in [windows macos unix] { fail "SSH OS must be windows, macos, or unix" }
-  if ($user | str contains "\n") or ($host | str contains "\n") { fail "SSH user and host must be single-line values" }
-  let candidate = (normalize-ssh-host $user $host $port_value $admin_value $os_value)
+  if ($user | str contains "\n") or ($host | str contains "\n") or ($name_value | str contains "\n") { fail "SSH user, host, and host name must be single-line values" }
+  if $name_value !~ '^[A-Za-z0-9][A-Za-z0-9._-]*$' { fail "SSH host name must contain only letters, digits, dots, underscores, and hyphens" }
+  let candidate = (normalize-ssh-host $user $host $port_value $admin_value $os_value $name_value)
   if (ssh-host-duplicate $config $candidate) { fail $"SSH host already configured for ($candidate.host):($candidate.port)" }
+  if (ssh-host-name-duplicate $config $candidate) { fail $"SSH host name already configured: ($candidate.name)" }
   print "SSH host to add:"
   $candidate | table --expand | print
   if $dry_run {

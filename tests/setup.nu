@@ -3,7 +3,7 @@
 
 use std assert
 use ./helpers.nu ["assert eq" "assert ne"]
-use ../lib/setup.nu [admin-key-path admin-keys-command gpg-batch-file jj-signing-behaviors normalize-ssh-host parse-gh-scopes parse-gpg-secret-ids setup-plan setup-hosts ssh-config-merge ssh-host-duplicate ssh-hosts-empty ssh-hosts-source-update ssh-install-args ssh-install-failure ssh-verification-args user-keys-command windows-admin-keys-script windows-user-keys-script]
+use ../lib/setup.nu [admin-key-path admin-keys-command gpg-batch-file jj-signing-behaviors normalize-ssh-host parse-gh-scopes parse-gpg-secret-ids setup-plan setup-hosts ssh-config-merge ssh-host-duplicate ssh-host-name-duplicate ssh-hosts-empty ssh-hosts-source-update ssh-install-args ssh-install-failure ssh-verification-args user-keys-command windows-admin-keys-script windows-user-keys-script]
 
 # Purpose planning: step selection, dependency closure, ordering, and
 # deduplication of shared steps.
@@ -105,15 +105,22 @@ def test-ssh-config-merge [] {
   assert ($merged | str contains "Host existing") "ssh config merge keeps existing hosts"
   let twice = (ssh-config-merge $merged [{user: alice host: example.com}])
   assert eq $twice $merged "ssh config merge is idempotent"
+
+  let aliased = (ssh-config-merge "" [{name: home user: alice host: 192.0.2.10 port: 22}])
+  assert ($aliased | str contains "Host home") "SSH config uses the configured host name"
+  assert ($aliased | str contains "HostName 192.0.2.10") "SSH config keeps the network address separate from the host name"
 }
 
 def test-ssh-host-helpers [] {
   let empty = {setup: {ssh: {hosts: []}}}
   assert (ssh-hosts-empty $empty) "empty SSH host configuration is detected"
   let candidate = (normalize-ssh-host " alice " "Example.COM" 2222 true windows)
-  assert eq $candidate {user: alice host: Example.COM port: 2222 admin: true os: windows} "SSH host normalization"
+  assert eq $candidate {name: Example.COM user: alice host: Example.COM port: 2222 admin: true os: windows} "SSH host normalization"
+  let named = (normalize-ssh-host alice 192.0.2.10 22 false unix home)
+  assert eq $named.name home "SSH host name can differ from its address"
   assert (ssh-host-duplicate {setup: {ssh: {hosts: [{user: bob host: example.com port: 2222}]}}} $candidate) "duplicate host and port detection ignores case"
   assert (not (ssh-host-duplicate {setup: {ssh: {hosts: [{user: bob host: example.com port: 22}]}}} $candidate)) "different SSH ports are allowed"
+  assert (ssh-host-name-duplicate {setup: {ssh: {hosts: [{name: HOME user: bob host: 192.0.2.11}]}}} $named) "duplicate SSH host names are rejected case-insensitively"
 
   let source = "{\n # preserve this comment\n setup: {\n  ssh: {\n   # preserve host docs\n   hosts: []\n  }\n }\n}\n"
   let updated = (ssh-hosts-source-update $source ($source | from nuon) [(normalize-ssh-host alice example.com)])

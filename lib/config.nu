@@ -490,6 +490,7 @@ export def validate-setup [
     return [{level: error area: setup message: "setup.ssh.hosts must be a list of host records"}]
   }
   mut issues = []
+  mut names = []
   for host in $hosts {
     if ($host | describe) !~ '^record' {
       $issues = ($issues | append {level: error area: setup message: "setup.ssh.hosts entries must be records with user and host"})
@@ -497,11 +498,22 @@ export def validate-setup [
     }
     let user = ($host.user? | default "")
     let hostname = ($host.host? | default "")
+    let name = ($host.name? | default null)
     if (($user | describe) != "string") or (($user | str trim) | is-empty) {
       $issues = ($issues | append {level: error area: setup message: $"Setup host requires a non-empty user: (($host | to nuon))"})
     }
     if (($hostname | describe) != "string") or (($hostname | str trim) | is-empty) {
       $issues = ($issues | append {level: error area: setup message: $"Setup host requires a non-empty host: (($host | to nuon))"})
+    }
+    if $name != null and ((($name | describe) != "string") or ($name !~ '^[A-Za-z0-9][A-Za-z0-9._-]*$')) {
+      $issues = ($issues | append {level: error area: setup message: $"Setup host name must contain only letters, digits, dots, underscores, and hyphens: (($host | to nuon))"})
+    } else {
+      let normalized_name = (($name | default $hostname) | str lowercase)
+      if $normalized_name in $names {
+        $issues = ($issues | append {level: error area: setup message: $"Setup host name must be unique: ($normalized_name)"})
+      } else {
+        $names = ($names | append $normalized_name)
+      }
     }
     let port = ($host.port? | default null)
     if $port != null and (($port | describe) != "int") {

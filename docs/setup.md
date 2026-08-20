@@ -79,12 +79,14 @@ skipped with a hint instead of being silently marked complete. Add a host with:
 nu reseed.nu setup ssh-host add
 ```
 
-The command prompts for omitted user, hostname, port, admin access, and host OS;
-their offered defaults are port `22`, non-admin, and `unix`. It then shows the
-normalized record and asks for confirmation. Use `--user`, `--host`, `--port`,
-`--os`, and `--admin` or `--no-admin` for scripted input; `--yes` accepts omitted
-defaults and the final confirmation. `--dry-run` previews without writing. A
-hostname and port may only be added once, ignoring hostname case. Hosts are
+The command prompts for omitted user, network host, SSH host name, port, admin
+access, and host OS; the SSH host name defaults to the network host, and the
+other offered defaults are port `22`, non-admin, and `unix`. It then shows the
+normalized record and asks for confirmation. Use `--user`, `--host`, `--name`,
+`--port`, `--os`, and `--admin` or `--no-admin` for scripted input; `--yes`
+accepts omitted defaults and the final confirmation. `--dry-run` previews
+without writing. A hostname and port may only be added once, ignoring hostname
+case, and every SSH host name must be unique. Hosts are
 stored in the base `config/recovery.nuon`; the command refuses to write when an
 active profile overrides `setup.ssh.hosts`, because that profile would hide the
 new entry.
@@ -122,7 +124,7 @@ setup: {
     comment: "alice@example.com"
     hosts: [
       # os selects the admin allow list: windows, macos, or unix.
-      {user: "alice" host: "home.example.com" port: 22 admin: false os: "unix"}
+      {name: "home" user: "alice" host: "home.example.com" port: 22 admin: false os: "unix"}
       {user: "Administrator" host: "win.example.com" admin: true os: "windows"}
     ]
   }
@@ -132,8 +134,9 @@ setup: {
 }
 ```
 
-`setup.ssh.hosts` entries require `user` and `host`; `port` (default 22),
-`admin` (default false), and `os` (default unix) are optional. Host entries
+`setup.ssh.hosts` entries require `user` and `host`; `name` controls the SSH
+`Host` alias and defaults to `host`. `port` (default 22), `admin` (default
+false), and `os` (default unix) are optional. Host entries
 are validated by `reseed status` and every workflow. Remove an entry to stop
 future setup runs from touching that host; the key already on the host is
 never removed.
@@ -155,7 +158,9 @@ independent Administrators and SYSTEM SIDs before adding the key. If Windows
 filters the SSH login's administrator token, perform the key installation from
 an elevated PowerShell session on the host (or connect as the built-in
 Administrator for this bootstrap); a non-interactive SSH session cannot accept
-a UAC elevation prompt.
+a UAC elevation prompt. Without an elevated token or another already-authorized
+privileged session/tool, remote installation of the administrator key is
+impossible; Reseed reports that condition and stops instead of claiming success.
 
 Initial installation permits SSH password or keyboard-interactive
 authentication and may prompt for the remote account password. Probes and the
