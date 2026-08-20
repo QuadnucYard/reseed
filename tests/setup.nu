@@ -3,7 +3,7 @@
 
 use std assert
 use ./helpers.nu ["assert eq" "assert ne"]
-use ../lib/setup.nu [admin-key-path admin-keys-command gpg-batch-file jj-signing-behaviors normalize-ssh-host parse-gh-scopes parse-gpg-secret-ids setup-plan setup-hosts ssh-config-merge ssh-host-duplicate ssh-hosts-empty ssh-hosts-source-update]
+use ../lib/setup.nu [admin-key-path admin-keys-command gpg-batch-file jj-signing-behaviors normalize-ssh-host parse-gh-scopes parse-gpg-secret-ids setup-plan setup-hosts ssh-config-merge ssh-host-duplicate ssh-hosts-empty ssh-hosts-source-update ssh-install-args ssh-install-failure ssh-verification-args user-keys-command windows-admin-keys-script windows-user-keys-script]
 
 # Purpose planning: step selection, dependency closure, ordering, and
 # deduplication of shared steps.
@@ -132,12 +132,45 @@ def test-admin-key-handling [] {
   assert eq (admin-key-path macos) "/var/root/.ssh/authorized_keys" "macos admin key path"
   assert eq (admin-key-path unix) "/root/.ssh/authorized_keys" "unix admin key path"
 
-  let unix = (admin-keys-command unix "ssh-ed25519 AAAAB3 test@example")
+  let unix = (admin-keys-command unix)
   assert ($unix | str contains "/root/.ssh/authorized_keys") "unix admin command targets the allow list"
-  assert ($unix | str contains "ssh-ed25519 AAAAB3") "unix admin command embeds the key"
-  let windows = (admin-keys-command windows "ssh-ed25519 AAAAB3 test@example")
-  assert ($windows | str contains "administrators_authorized_keys") "windows admin command targets the allow list"
-  assert ($windows | str contains "Add-Content") "windows admin command uses PowerShell"
+  assert ($unix | str contains "key=$(cat)") "unix admin command reads the key from stdin"
+  let windows = (admin-keys-command windows)
+  assert ($windows | str contains "-EncodedCommand") "Windows admin command is independent of the configured sshd shell"
+  let windows_admin_script = (windows-admin-keys-script)
+  assert ($windows_admin_script | str contains "administrators_authorized_keys") "windows admin command targets the allow list"
+  assert ($windows_admin_script | str contains "icacls.exe") "windows admin command restricts the allow-list ACL"
+  assert ($windows_admin_script | str contains "S-1-5-32-544:F") "windows admin ACL grants the built-in Administrators group independent of locale"
+  assert ($windows_admin_script | str contains "S-1-5-18:F") "windows admin ACL grants SYSTEM"
+  assert ($windows_admin_script | str contains "AppendAllText") "windows admin command writes UTF-8 without a BOM"
+
+  let windows_user = (user-keys-command windows)
+  assert ($windows_user | str contains "-EncodedCommand") "Windows user keys use shell-independent encoded PowerShell"
+  let windows_user_script = (windows-user-keys-script)
+  assert ($windows_user_script | str contains "[Console]::In.ReadToEnd") "Windows user key reads the public key from stdin"
+  assert ($windows_user_script | str contains "WindowsIdentity]::GetCurrent().User.Value") "Windows user ACL uses the current account SID"
+  let unix_user = (user-keys-command unix)
+  assert ($unix_user | str contains "key=$(cat)") "Unix user key reads the public key from stdin"
+  assert ($unix_user | str contains "grep -qxF") "Unix user key installation is idempotent"
+}
+
+def test-ssh-install-errors [] {
+  let admin = {user: Administrator host: win.example port: 22 admin: true os: windows}
+  let install_args = (ssh-install-args $admin)
+  assert ("BatchMode=no" in $install_args) "initial SSH key installation permits interactive authentication"
+  assert ("BatchMode=yes" not-in $install_args) "initial SSH key installation is not forced into batch mode"
+  assert ("NumberOfPasswordPrompts=3" in $install_args) "initial SSH key installation bounds password retries"
+  let verification_args = (ssh-verification-args $admin "C:\\keys\\id_ed25519")
+  assert ("BatchMode=yes" in $verification_args) "SSH key verification is noninteractive"
+  assert ("IdentitiesOnly=yes" in $verification_args) "SSH key verification excludes unrelated identities"
+  assert ("C:\\keys\\id_ed25519" in $verification_args) "SSH key verification uses the managed identity"
+  let auth = (ssh-install-failure $admin {exit_code: 255 stdout: "" stderr: "Permission denied (publickey,password)."} "Windows administrator key file")
+  assert ($auth | str contains "authentication failed") "SSH authentication failures are classified"
+  let acl = (ssh-install-failure $admin {exit_code: 1 stdout: "" stderr: "Access is denied."} "Windows administrator key file")
+  assert ($acl | str contains "elevated token") "Windows administrator ACL failures explain elevation"
+  assert ($acl | str contains "Access is denied") "remote failure evidence is retained"
+  let timeout = (ssh-install-failure $admin {exit_code: 255 stdout: "" stderr: "Connection timed out"} "Windows administrator key file")
+  assert ($timeout | str contains "network, firewall, and port") "SSH timeouts have network guidance"
 }
 
 # GPG batch key generation content.
@@ -165,6 +198,7 @@ def main [] {
   test-ssh-config-merge
   test-ssh-host-helpers
   test-admin-key-handling
+  test-ssh-install-errors
   test-gpg-batch-file
   test-jj-signing-behaviors
 

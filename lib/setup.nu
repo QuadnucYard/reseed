@@ -53,7 +53,7 @@ use setup/gpg.nu [
 # entrypoints and tests import them from here).
 export use setup/plan.nu [setup-plan]
 export use setup/shared.nu [parse-gh-scopes parse-gpg-secret-ids]
-export use setup/ssh.nu [admin-key-path admin-keys-command normalize-ssh-host setup-hosts ssh-config-merge ssh-host-duplicate ssh-hosts-empty ssh-hosts-source-update]
+export use setup/ssh.nu [admin-key-path admin-keys-command normalize-ssh-host setup-hosts ssh-config-merge ssh-host-duplicate ssh-hosts-empty ssh-hosts-source-update ssh-install-args ssh-install-failure ssh-verification-args user-keys-command windows-admin-keys-script windows-user-keys-script]
 export use setup/gpg.nu [gpg-batch-file]
 export use setup/jj.nu [jj-signing-behaviors]
 export use setup/provider.nu [parse-repo-url provider-descriptor repo-transport-check setup-gh-credential-helper setup-gh-repo-probe]

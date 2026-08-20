@@ -117,9 +117,24 @@ def ssh-connect-args [host: record, extra: list<string> = []]: nothing -> list<s
     | append ["-p" ($host.port | into string) (ssh-target $host)]
 }
 
+# SSH arguments for bootstrapping a key. Unlike probes, installation permits
+# password or keyboard-interactive authentication while retaining a timeout.
+export def ssh-install-args [host: record, extra: list<string> = []]: nothing -> list<string> {
+  ["-o" "BatchMode=no" "-o" "ConnectTimeout=10" "-o" "NumberOfPasswordPrompts=3"]
+    | append $extra
+    | append ["-p" ($host.port | into string) (ssh-target $host)]
+}
+
+export def ssh-verification-args [host: record, key_path: string]: nothing -> list<string> {
+  ssh-connect-args $host ["-i" $key_path "-o" "IdentitiesOnly=yes"]
+}
+
 # Whether passwordless login to the host already works.
 def host-key-installed [host: record]: nothing -> bool {
-  let probe = (run-command ssh ((ssh-connect-args $host) | append "exit 0") --allow-failure --quiet)
+  let key = (ssh-key-status)
+  if not $key.key_present { return false }
+  let args = (ssh-verification-args $host $key.key_path | append "exit 0")
+  let probe = (run-command ssh $args --allow-failure --quiet)
   $probe.exit_code == 0
 }
 
@@ -173,18 +188,77 @@ export def admin-key-path [os: string]: nothing -> string {
   }
 }
 
-# POSIX command that appends stdin to the account's authorized_keys.
-def authorized-keys-command []: nothing -> string {
-  "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+# Encode an ASCII-only PowerShell bootstrap script as UTF-16LE Base64. Using
+# -EncodedCommand avoids quoting differences between cmd and PowerShell sshd
+# default shells.
+def powershell-encoded-command [script: string]: nothing -> string {
+  let encoded = ($script | split chars | each {|char| $char | encode ascii | bytes add 0x[00] --end } | bytes collect | encode base64)
+  $"powershell -NoProfile -NonInteractive -EncodedCommand ($encoded)"
+}
+
+export def windows-user-keys-script []: nothing -> string {
+  [
+      "$ErrorActionPreference = 'Stop'"
+      "$directory = Join-Path $HOME '.ssh'"
+      "$path = Join-Path $directory 'authorized_keys'"
+      "$key = [Console]::In.ReadToEnd().Trim()"
+      "if ([string]::IsNullOrWhiteSpace($key)) { throw 'no public key received on stdin' }"
+      "New-Item -ItemType Directory -Path $directory -Force | Out-Null"
+      "if (-not (Test-Path -LiteralPath $path)) { New-Item -ItemType File -Path $path -Force | Out-Null }"
+      "$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value"
+      "$principal = '*' + $sid + ':F'"
+      "& icacls.exe $directory '/inheritance:r' '/grant:r' $principal '*S-1-5-18:F' | Out-Null"
+      "if ($LASTEXITCODE -ne 0) { throw ('directory icacls failed with exit code ' + $LASTEXITCODE) }"
+      "& icacls.exe $path '/inheritance:r' '/grant:r' $principal '*S-1-5-18:F' | Out-Null"
+      "if ($LASTEXITCODE -ne 0) { throw ('authorized_keys icacls failed with exit code ' + $LASTEXITCODE) }"
+      "$lines = @(Get-Content -LiteralPath $path -ErrorAction SilentlyContinue)"
+      "if ($key -notin $lines) { [IO.File]::AppendAllText($path, $key + [Environment]::NewLine, [Text.UTF8Encoding]::new($false)) }"
+  ] | str join "; "
+}
+
+# Command that idempotently appends a key read from stdin to the account's
+# authorized_keys file, with platform-appropriate permissions.
+export def user-keys-command [os: string]: nothing -> string {
+  if $os == "windows" {
+    powershell-encoded-command (windows-user-keys-script)
+  } else {
+    "set -e; key=$(cat); test -n \"$key\"; mkdir -p ~/.ssh; chmod 700 ~/.ssh; touch ~/.ssh/authorized_keys; if ! grep -qxF \"$key\" ~/.ssh/authorized_keys; then printf '%s\\n' \"$key\" >> ~/.ssh/authorized_keys; fi; chmod 600 ~/.ssh/authorized_keys"
+  }
 }
 
 # Command that appends a public key line to the admin allow list on the host.
-export def admin-keys-command [os: string, key: string]: nothing -> string {
+export def windows-admin-keys-script []: nothing -> string {
+  let path = (admin-key-path windows)
+  [
+    "$ErrorActionPreference = 'Stop'"
+    $"$path = '($path)'"
+    "$key = [Console]::In.ReadToEnd().Trim()"
+    "if ([string]::IsNullOrWhiteSpace($key)) { throw 'no public key received' }"
+    "if (-not (Test-Path -LiteralPath $path)) { New-Item -ItemType File -Path $path -Force | Out-Null }"
+    "& icacls.exe $path '/inheritance:r' '/grant:r' '*S-1-5-32-544:F' '*S-1-5-18:F' | Out-Null"
+    "if ($LASTEXITCODE -ne 0) { throw ('icacls failed with exit code ' + $LASTEXITCODE) }"
+    "$lines = @(Get-Content -LiteralPath $path -ErrorAction SilentlyContinue)"
+    "if ($key -notin $lines) { [IO.File]::AppendAllText($path, $key + [Environment]::NewLine, [Text.UTF8Encoding]::new($false)) }"
+  ] | str join "; "
+}
+
+export def admin-keys-command [os: string]: nothing -> string {
   if $os == "windows" {
-    let path = (admin-key-path $os)
-    $"powershell -NoProfile -Command \"Add-Content -Path '($path)' -Value '($key)'\""
+    powershell-encoded-command (windows-admin-keys-script)
   } else {
-    $"mkdir -p (admin-key-path $os | path dirname) && chmod 700 (admin-key-path $os | path dirname) && echo '($key)' >> (admin-key-path $os) && chmod 600 (admin-key-path $os)"
+    let path = (admin-key-path $os)
+    [
+      "set -e"
+      "key=$(cat)"
+      "test -n \"$key\""
+      $"path='($path)'"
+      "directory=$(dirname \"$path\")"
+      "mkdir -p \"$directory\""
+      "chmod 700 \"$directory\""
+      "touch \"$path\""
+      "if ! grep -qxF \"$key\" \"$path\"; then printf '%s\\n' \"$key\" >> \"$path\"; fi"
+      "chmod 600 \"$path\""
+    ] | str join "; "
   }
 }
 
@@ -262,12 +336,40 @@ def ssh-append-pubkey [
   host: record # Host entry.
   remote_command: string # Command that appends stdin to the target file.
 ]: nothing -> record {
-  let args = (ssh-connect-args $host ["-o" "StrictHostKeyChecking=accept-new"])
+  let args = (ssh-install-args $host ["-o" "StrictHostKeyChecking=accept-new"])
   try {
     $pub | run-external ssh ...$args $remote_command | complete
   } catch {|error|
     {exit_code: 127 stdout: "" stderr: ($error.msg? | default ($error | to nuon))}
   }
+}
+
+# Turn SSH/remote-shell failures into stable, actionable diagnostics while
+# retaining the original output and exit code for troubleshooting.
+export def ssh-install-failure [host: record, result: record, target: string]: nothing -> string {
+  let output = ($"(($result.stderr? | default '') | str trim) (($result.stdout? | default '') | str trim)" | str trim)
+  let lower = ($output | str lowercase)
+  let reason = if ($lower | str contains "permission denied (") or ($lower | str contains "permission denied, please try again") or ($lower | str contains "authentication failed") {
+    "SSH authentication failed; enable password or keyboard-interactive login for the initial key installation"
+  } else if ($lower | str contains "permission denied") or ($lower | str contains "access is denied") or ($lower | str contains "unauthorizedaccess") {
+    if $host.os == "windows" and $host.admin {
+      "permission denied; the Windows SSH account needs an elevated token to update C:\\ProgramData\\ssh"
+    } else {
+      "permission denied while updating the remote key file"
+    }
+  } else if ($lower | str contains "connection refused") {
+    "SSH connection refused; verify sshd and the configured port"
+  } else if ($lower | str contains "timed out") or ($lower | str contains "timeout") {
+    "SSH connection timed out; verify the host, network, firewall, and port"
+  } else if ($lower | str contains "could not resolve hostname") or ($lower | str contains "name or service not known") {
+    "SSH hostname could not be resolved"
+  } else if ($lower | str contains "host key verification failed") {
+    "SSH host-key verification failed; inspect and remove the stale known_hosts entry before retrying"
+  } else {
+    $"remote key installation exited with code ($result.exit_code? | default 127)"
+  }
+  let evidence = if ($output | is-empty) { "" } else { $"; remote output: ($output)" }
+  $"($host.user)@($host.host): ($target) failed: ($reason)($evidence)"
 }
 
 # Install the public key on every configured host, and on the admin allow
@@ -284,31 +386,46 @@ export def setup-ssh-hosts [
   mut reports = []
   for host in $hosts {
     if (host-key-installed $host) {
-      $reports = ($reports | append $"($host.user)@($host.host): key present")
+      $reports = ($reports | append {ok: true detail: $"($host.user)@($host.host): passwordless login verified"})
       continue
     }
     if $dry_run {
-      $reports = ($reports | append $"($host.user)@($host.host): would upload the key")
+      let target = if $host.os == "windows" and $host.admin { "Windows administrator key file" } else { "user key file" }
+      $reports = ($reports | append {ok: true detail: $"($host.user)@($host.host): would install the key in the ($target) and verify passwordless login"})
       continue
     }
-    let uploaded = (ssh-append-pubkey $pub $host (authorized-keys-command))
+
+    # Administrators on Windows are matched by sshd's shared key-file rule;
+    # their per-user authorized_keys file is ignored, so write the shared file
+    # directly. Other platforms bootstrap the user file first.
+    let direct_admin = ($host.os == "windows") and $host.admin
+    let target = if $direct_admin { "Windows administrator key file" } else { "user key file" }
+    let command = if $direct_admin { admin-keys-command windows } else { user-keys-command $host.os }
+    let uploaded = (ssh-append-pubkey $pub $host $command)
     if $uploaded.exit_code != 0 {
-      $reports = ($reports | append $"($host.user)@($host.host): upload failed: ($uploaded.stderr | str trim)")
+      $reports = ($reports | append {ok: false detail: (ssh-install-failure $host $uploaded $target)})
       continue
     }
-    $reports = ($reports | append $"($host.user)@($host.host): key uploaded")
-    if $host.admin {
-      let added = (run-command ssh ((ssh-connect-args $host) | append (admin-keys-command $host.os $pub)) --allow-failure)
+
+    mut details = [$"($host.user)@($host.host): installed key in ($target)"]
+    if $host.admin and not $direct_admin {
+      let added = (ssh-append-pubkey $pub $host (admin-keys-command $host.os))
       if $added.exit_code == 0 {
-        $reports = ($reports | append $"admin list: (admin-key-path $host.os)")
+        $details = ($details | append $"administrator key file: (admin-key-path $host.os)")
       } else {
-        let stderr = ($added.stderr | str trim)
-        let failure = if ($stderr | is-empty) { "admin list: failed" } else { $"admin list: failed: ($stderr)" }
-        $reports = ($reports | append $failure)
+        $reports = ($reports | append {ok: false detail: (ssh-install-failure $host $added "administrator key file")})
+        continue
       }
     }
+
+    if not (host-key-installed $host) {
+      $reports = ($reports | append {ok: false detail: $"($host.user)@($host.host): key files were updated, but passwordless login verification failed; inspect sshd logs and key-file ACLs"})
+      continue
+    }
+    $details = ($details | append "passwordless login verified")
+    $reports = ($reports | append {ok: true detail: ($details | str join "; ")})
   }
-  {step: ssh-hosts ok: ($reports | all {|report| not ($report | str contains "failed") }) detail: ($reports | str join "; ")}
+  {step: ssh-hosts ok: ($reports | all {|report| $report.ok }) detail: ($reports | get detail | str join "; ")}
 }
 
 # Add Host blocks for configured hosts to ~/.ssh/config, keeping existing

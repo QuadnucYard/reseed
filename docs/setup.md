@@ -147,6 +147,25 @@ admin allow list:
 | `macos` | `/var/root/.ssh/authorized_keys` |
 | `unix` | `/root/.ssh/authorized_keys` |
 
+Windows OpenSSH uses `administrators_authorized_keys` for accounts in the
+built-in Administrators group and ignores their per-user `authorized_keys`.
+Updating this file requires an elevated SSH session. Reseed creates the file,
+removes inherited permissions, and grants full control only to the locale-
+independent Administrators and SYSTEM SIDs before adding the key. If Windows
+filters the SSH login's administrator token, perform the key installation from
+an elevated PowerShell session on the host (or connect as the built-in
+Administrator for this bootstrap); a non-interactive SSH session cannot accept
+a UAC elevation prompt.
+
+Initial installation permits SSH password or keyboard-interactive
+authentication and may prompt for the remote account password. Probes and the
+mandatory post-install check use batch mode, so a host is only reported as
+successful after passwordless login works with the exact managed
+`~/.ssh/id_ed25519` key (`IdentitiesOnly=yes`). Windows hosts receive
+PowerShell key-file commands; Unix and macOS hosts receive POSIX commands.
+Failures retain the remote output and distinguish authentication, permissions,
+name resolution, host-key, refused-connection, and timeout errors.
+
 ## Security notes
 
 SSH keys are ed25519 without a passphrase and GPG keys are ed25519 signing
