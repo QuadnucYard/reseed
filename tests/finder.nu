@@ -14,6 +14,8 @@ def test-finder-services [
   let workflows = (finder-service-workflows)
   assert eq ($workflows.name) [OpenTerminalHere OpenCurrentFolderInVSCode OpenSelectedFolderInVSCode] "Finder service bundle names"
   assert eq ($workflows.display_name) ["Open Terminal Here" "Open in VS Code" "Open in VS Code"] "the two VS Code entries share the 'Open in VS Code' label"
+  assert eq ($workflows.input_type) ["com.apple.Automator.nothing" "com.apple.Automator.nothing" "com.apple.Automator.fileSystemObject"] "current actions receive no selection while the selected action receives Finder items"
+  assert eq ($workflows.processes_input) [false false true] "only the selected action processes Finder input"
   assert (($workflows | where context == current | all {|wf| $wf.script | str contains "front window" })) "current-folder services resolve the Finder front window"
   assert (not (($workflows | where name == OpenSelectedFolderInVSCode | get script | first | str contains "front window"))) "selected-folder service never resolves the front window"
   assert (($workflows | where name == OpenTerminalHere | get script | first | str contains "open -a iTerm")) "terminal service prefers iTerm2"
@@ -28,15 +30,22 @@ def test-finder-services [
   let document_template = (open --raw ($engine_root | path join "templates" "macos" "finder" "document.wflow"))
   let info_template = (open --raw ($engine_root | path join "templates" "macos" "finder" "Info.plist"))
 
-  let plist = (finder-document-plist $document_template ($workflows | get script | first))
+  let plist = (finder-document-plist $document_template ($workflows | first))
   assert (($plist | str trim | str ends-with "</plist>")) "plist is a complete XML document"
   assert ($plist | str contains "com.apple.Automator.QuickAction") "plist marks the workflow as a Quick Action"
   assert ($plist | str contains "Run Shell Script") "plist uses the Run Shell Script action"
   assert ($plist | str contains "/bin/zsh") "plist runs the script with zsh"
+  assert ($plist | str contains "com.apple.finder") "plist registers the Quick Action for Finder"
+  assert ($plist | str contains "com.apple.Automator.nothing") "current-folder plist declares that it receives no selection"
+  assert ($plist | str contains "serviceProcessesInput</key>\n\t\t<false/>") "current-folder plist does not process Finder input"
   assert ($plist | str contains "open -a iTerm") "plist embeds the service script"
   assert (not ($plist | str contains "@@")) "plist generation replaces every placeholder"
-  let escaped = (finder-document-plist $document_template "echo a & b < c > d")
+  let escaped = (finder-document-plist $document_template (($workflows | first) | update script "echo a & b < c > d"))
   assert ($escaped | str contains "echo a &amp; b &lt; c &gt; d") "plist generation escapes XML specials"
+  let selected = (finder-document-plist $document_template ($workflows | last))
+  assert ($selected | str contains "com.apple.Automator.fileSystemObject") "selected-folder plist accepts Finder file-system objects"
+  assert ($selected | str contains "serviceProcessesInput</key>\n\t\t<true/>") "selected-folder plist processes Finder input"
+  assert (not ($selected | str contains "@@")) "selected-folder plist generation replaces every placeholder"
   let info = (finder-info-plist $info_template "Open in VS Code" "com.reseed.finder.OpenSelectedFolderInVSCode")
   assert ($info | str contains "Open in VS Code") "bundle Info.plist carries the display name"
   assert ($info | str contains "com.reseed.finder.OpenSelectedFolderInVSCode") "bundle Info.plist carries a unique bundle identifier"

@@ -21,9 +21,9 @@ use ../lib/prelude.nu *
 # apart for status, reconcile, and verification.
 export def finder-service-workflows []: nothing -> list<record> {
   [
-    {name: OpenTerminalHere display_name: "Open Terminal Here" context: current script: (open-terminal-script)}
-    {name: OpenCurrentFolderInVSCode display_name: "Open in VS Code" context: current script: (open-current-vscode-script)}
-    {name: OpenSelectedFolderInVSCode display_name: "Open in VS Code" context: selected script: (open-selected-vscode-script)}
+    {name: OpenTerminalHere display_name: "Open Terminal Here" context: current input_type: "com.apple.Automator.nothing" processes_input: false script: (open-terminal-script)}
+    {name: OpenCurrentFolderInVSCode display_name: "Open in VS Code" context: current input_type: "com.apple.Automator.nothing" processes_input: false script: (open-current-vscode-script)}
+    {name: OpenSelectedFolderInVSCode display_name: "Open in VS Code" context: selected input_type: "com.apple.Automator.fileSystemObject" processes_input: true script: (open-selected-vscode-script)}
   ]
 }
 
@@ -95,10 +95,15 @@ def xml-escape [value: string]: nothing -> string {
 
 # The document.wflow XML of one Quick Action bundle: the given template with
 # the zsh script embedded and fresh identifiers for every UUID slot.
-export def finder-document-plist [template: string, script: string]: nothing -> string {
+export def finder-document-plist [
+  template: string
+  workflow: record
+]: nothing -> string {
   let action_uuid = (random uuid)
   $template
-  | str replace --all "@@COMMAND_STRING@@" (xml-escape $script)
+  | str replace --all "@@COMMAND_STRING@@" (xml-escape $workflow.script)
+  | str replace --all "@@SERVICE_INPUT_TYPE@@" (xml-escape $workflow.input_type)
+  | str replace --all "@@SERVICE_PROCESSES_INPUT@@" (if $workflow.processes_input { "<true/>" } else { "<false/>" })
   | str replace --all "@@UUID_ACTION@@" $action_uuid
   | str replace --all "@@UUID_INPUT@@" (random uuid)
   | str replace --all "@@UUID_OUTPUT@@" (random uuid)
@@ -217,7 +222,7 @@ export def finder-restore [
       info $"would write Finder service: ($contents | path join "document.wflow")"
     } else {
       mkdir $contents
-      ((finder-document-plist $document_template $workflow.script) + "\n") | save --force ($contents | path join "document.wflow")
+      ((finder-document-plist $document_template $workflow) + "\n") | save --force ($contents | path join "document.wflow")
       ((finder-info-plist $info_template $workflow.display_name $"com.reseed.finder.($workflow.name)") + "\n") | save --force ($contents | path join "Info.plist")
       info $"wrote Finder service: ($contents | path dirname)"
     }
