@@ -90,8 +90,8 @@ export def mise-shell-task [settings: record]: nothing -> string {
   }
 }
 
-# Restore the portable-tools stage: install mise tools, prepare the managed
-# bin directory, then restore the cargo-binstall, uv, and Node manager globals,
+# Restore the portable-tools stage: install mise tools, then restore the
+# cargo-binstall, uv, and Node manager globals in their native locations,
 # and finally run general restore tasks. Shell configuration runs after
 # chezmoi so generated profile loaders cannot be overwritten by apply.
 # Package-manager install failures only warn; the returned count lets the
@@ -110,7 +110,6 @@ export def mise-restore [
     if $result.exit_code != 0 { $failures += 1 }
   }
 
-  prepare-managed-bin --dry-run=$dry_run
 
   $failures += (cargo-binstall-restore $root $config --dry-run=$dry_run)
   $failures += (uv-restore $root $config --dry-run=$dry_run)
@@ -177,7 +176,6 @@ export def mise-update [
     let result = (run-or-warn mise (mise-args $path ["upgrade" "--yes"]) --dry-run=$dry_run --label=$"mise upgrade ($relative)")
     if $result.exit_code != 0 { $failures += 1 }
   }
-  prepare-managed-bin --dry-run=$dry_run
   $failures += (cargo-binstall-update $root $config --dry-run=$dry_run)
   $failures += (uv-update $root $config --dry-run=$dry_run)
   for manager in [pnpm yarn bun] {

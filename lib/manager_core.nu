@@ -3,7 +3,7 @@
 # missing-package detection, and the reconcile/verify report builders.
 
 use core.nu [fail require-file]
-use managed_tools.nu [managed-command-checks]
+use managed_tools.nu [package-command-checks]
 
 # Settings record for a package manager nested under software.mise.
 export def manager-settings [
@@ -154,5 +154,5 @@ export def manager-verify [
       detail: (if ($missing | is-empty) { $"all configured ($manager) ($unit)s installed" } else { $"missing: (($missing | get spec) | str join ', ')" })
     }
   ]
-  $results | append (managed-command-checks $manager $desired)
+  $results | append (package-command-checks $manager $desired)
 }

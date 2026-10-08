@@ -354,13 +354,39 @@ def test-mise-commands [
   assert eq (mise-exec-args ($state_root | path join "mise.toml") "pnpm" ["--version"]) ["-C" ($state_root | into string) "exec" "--" "pnpm" "--version"] "mise exec command construction"
   assert eq (mise-exec-args ($state_root | path join "mise.work.toml") "uv" ["--version"]) ["-C" ($state_root | into string) "-E" "work" "exec" "--" "uv" "--version"] "mise environment command construction"
   assert eq (mise-shell-config $state_root $config) (($state_root | path join "mise.toml") | path expand --no-symlink) "mise shell config resolves from configuration"
-  assert eq ((managed-tool-environment).PNPM_HOME) (managed-bin-dir | path dirname | into string) "PNPM_HOME uses managed root so pnpm's global bin dir is the managed bin directory"
-  assert eq ((managed-tool-environment).UV_TOOL_BIN_DIR) (managed-bin-dir | into string) "UV_TOOL_BIN_DIR uses managed bin directory"
-  assert eq ((managed-tool-environment).YARN_PREFIX) (managed-bin-dir | path dirname | into string) "YARN_PREFIX uses managed root"
-  assert eq ((managed-tool-environment).BUN_INSTALL) (managed-bin-dir | path dirname | into string) "BUN_INSTALL uses managed root"
-  assert eq ((managed-tool-environment).CARGO_INSTALL_ROOT) (managed-bin-dir | path dirname | into string) "Cargo installs use managed root"
-  assert (((managed-tool-environment).PATH | first) == (managed-bin-dir | into string)) "PATH prepends managed bin directory"
-  assert eq (cargo-binstall-args (managed-bin-dir | path dirname) [ripgrep]) ["--no-confirm" "--disable-telemetry" "--root" (managed-bin-dir | path dirname | into string) ripgrep] "cargo-binstall uses explicit shared root"
+  let custom = {BUN_INSTALL: "/custom/bun" PNPM_HOME: "/custom/pnpm" UV_TOOL_BIN_DIR: "/custom/uv" CARGO_INSTALL_ROOT: "/custom/cargo"}
+  with-env $custom {
+    let environment = (package-manager-environment)
+    assert (not ("BUN_INSTALL" in $environment)) "custom Bun root is not overridden"
+    assert (not ("PNPM_HOME" in $environment)) "custom pnpm root is not overridden"
+    assert (not ("UV_TOOL_BIN_DIR" in $environment)) "custom uv bin is not overridden"
+    assert (not ("CARGO_INSTALL_ROOT" in $environment)) "custom Cargo root is not overridden"
+    assert eq $env.BUN_INSTALL $custom.BUN_INSTALL "parent environment survives inspection"
+  }
+  let legacy = ($nu.home-dir | path join ".local" "share" "reseed")
+  with-env {BUN_INSTALL: ($legacy | into string) PNPM_HOME: ($legacy | path join "bin" | into string)} {
+    let environment = (package-manager-environment)
+    with-env $environment {
+      assert eq $env.BUN_INSTALL? null "legacy Bun redirect is removed in child scope"
+      assert (not ($env.PNPM_HOME | str contains "reseed")) "pnpm uses its native home"
+      assert (not ($env.PATH | any {|p| ($p | into string) == ($legacy | path join "bin" | into string) })) "legacy PATH entry is removed in child scope"
+    }
+    assert eq $env.BUN_INSTALL ($legacy | into string) "legacy parent remains unchanged"
+  }
+  with-env {PNPM_HOME: null XDG_DATA_HOME: "/custom/xdg"} {
+    assert eq (package-manager-environment).PNPM_HOME ("/custom/xdg" | path join "pnpm") "pnpm retains the native XDG default"
+  }
+  assert eq (cargo-binstall-args [ripgrep]) ["--no-confirm" "--disable-telemetry" ripgrep] "Cargo respects its native configured root"
+  assert eq (cargo-binstall-args [ripgrep] --update) ["--no-confirm" "--disable-telemetry" "--force" ripgrep] "Cargo updates retain native root"
+  with-env {PATH: [] BUN_INSTALL: "/custom/bun" UV_TOOL_BIN_DIR: "/custom/uv" CARGO_INSTALL_ROOT: "/custom/cargo"} {
+    let child_paths = (package-manager-environment).PATH | each {|p| $p | into string | str replace --all "\\" "/" }
+    assert ("/custom/bun/bin" in $child_paths) "clean restore exposes native Bun commands to verification"
+    assert ("/custom/uv" in $child_paths) "clean restore exposes custom uv commands to verification"
+    assert ("/custom/cargo/bin" in $child_paths) "clean restore exposes native Cargo commands to verification"
+    assert eq $env.PATH [] "verification does not change the parent's PATH"
+  }
+
+
 }
 
 # Execute the shell generator in an isolated home, repeat it to exercise
@@ -432,7 +458,7 @@ def test-shell-generation-in [
   assert ($zsh | str contains "mise activate zsh") "Zsh uses Zsh activation"
   assert (not ($zsh | str contains "mise activate bash")) "Zsh does not install Bash hooks"
   assert (($dispatch | str contains "mise activate bash") and ($dispatch | str contains "mise activate zsh")) "compatibility adapter dispatches by shell"
-  assert (($bash | str index-of "reseed_prepend_path") < ($bash | str index-of "mise activate bash")) "mise activation owns final PATH precedence"
+  assert (($bash | str index-of "reseed_append_path") < ($bash | str index-of "mise activate bash")) "mise activation owns final PATH precedence"
   let posix_cargo_bin = (($cargo_home | path join "bin" | into string) | str replace --all "\\" "/" | str replace --all "'" "'\\''")
   assert ($bash | str contains $posix_cargo_bin) "Bash uses configured Cargo home"
   let posix_brew_bin = (($brew_prefix | path join "bin" | into string) | str replace --all "\\" "/" | str replace --all "'" "'\\''")
@@ -460,6 +486,27 @@ def test-shell-generation-in [
   let nu_literal = ($nu_environment | into string | to nuon)
   let probe = (run-command nu ["--no-config-file" "-c" $"source ($nu_literal); print $env.MISE_GLOBAL_CONFIG_FILE"] --quiet --capture)
   assert eq ($probe.stdout | str trim) ($mise_config | path expand --no-symlink | into string) "generated Nushell environment exports selected config"
+  let native_bun = ($home | path join ".bun" "bin")
+  mkdir $native_bun
+  let probe_code = '$env.BUN_INSTALL = "/custom/bun"; $env.UV_TOOL_BIN_DIR = "/custom/uv"; source ' + $nu_literal + '; source ' + $nu_literal + '; {bun: $env.BUN_INSTALL uv: $env.UV_TOOL_BIN_DIR count: ($env.PATH | where {|p| $p == ' + ($native_bun | into string | to nuon) + '} | length)} | to json'
+  let roots_probe = (run-command nu ["--no-config-file" "-c" $probe_code] --quiet --capture)
+  let actual = ($roots_probe.stdout | from json)
+  assert eq $actual.bun "/custom/bun" "adapter preserves custom Bun settings"
+  assert eq $actual.uv "/custom/uv" "adapter preserves custom uv settings"
+  assert eq $actual.count 1 "native PATH exposure is idempotent"
+  let old_root = ($nu.home-dir | path join ".local" "share" "reseed" | into string | to nuon)
+  let old_bin = ($nu.home-dir | path join ".local" "share" "reseed" "bin" | into string | to nuon)
+  let cleanup_code = '$env.BUN_INSTALL = ' + $old_root + '; $env.PNPM_HOME = ' + $old_bin + '; source ' + $nu_literal + '; {bun: $env.BUN_INSTALL? pnpm: $env.PNPM_HOME? child_bun: (^nu --no-config-file -c "$env.BUN_INSTALL? | to json" | str trim)} | to json'
+  let cleanup = (run-command nu ["--no-config-file" "-c" $cleanup_code] --quiet --capture).stdout | from json
+  let native_bun_root = ($home | path join ".bun" | into string)
+  assert eq $cleanup.bun $native_bun_root "legacy Bun root migrates to the native location"
+  assert ($cleanup.pnpm != ($nu.home-dir | path join ".local" "share" "reseed" "bin" | into string)) "legacy pnpm root migrates to the native location"
+  assert eq ($cleanup.child_bun | from json) $native_bun_root "native root propagates to external child environment"
+
+  for source in [$powershell $bash $zsh $fish] {
+    assert (not ($source | str contains "share/reseed/bin")) "adapters do not expose the legacy package bin"
+  }
+
 
   let stale_environment = ($autoload | path join "reseed-managed-tools.nu")
   let stale_activation = ($autoload | path join "mise.nu")
@@ -510,6 +557,46 @@ def test-sync-engine-files [
     rm ($root | path join "scripts" "configure-shells.nu")
     sync-engine-files $engine_root $root --dry-run
     assert (not (($root | path join "scripts" "configure-shells.nu") | path exists)) "dry-run sync does not write"
+    let generator = ($root | path join "scripts" "configure-shells.nu")
+    "# custom generator\n" | save $generator
+    sync-engine-files $engine_root $root
+    assert eq (open --raw $generator) "# custom generator\n" "custom shell generators survive sync"
+    # Use distinct stock content without depending on Git HEAD or checkout history.
+    let stock_engine = ($root | path join "stock-engine")
+    let stock_templates = ($stock_engine | path join "templates")
+    let stock_script = ($stock_templates | path join "state" "scripts" "configure-shells.nu")
+    mkdir ($stock_script | path dirname)
+    cp ($engine_root | path join "templates" "state" "scripts" "configure-shells.nu") $stock_script
+    let shipped = "# previous stock generator\n"
+    let stock_hash = ($shipped | hash sha256)
+    open ($engine_root | path join "templates" "stock-shell-generator-hashes.nuon")
+      | append $stock_hash
+      | save ($stock_templates | path join "stock-shell-generator-hashes.nuon")
+    $shipped | save --force $generator
+    sync-engine-files $stock_engine $root --dry-run
+    assert eq (open --raw $generator) $shipped "stock upgrade dry run does not write"
+    let ownership_dir = ($root | path join "shell" "engine-files")
+    assert ((ls $ownership_dir | where {|entry| $entry.name | str ends-with ".bak" } | is-empty)) "stock upgrade dry run does not back up"
+    sync-engine-files $stock_engine $root
+    assert eq (open --raw $generator | str replace --all "\r\n" "\n") (open --raw ($engine_root | path join "templates" "state" "scripts" "configure-shells.nu")) "stock generator upgrades to current engine version"
+    let backups = (ls $ownership_dir | where {|entry| $entry.name | str ends-with ".bak" })
+    assert eq ($backups | length) 1 "stock upgrade preserves an ignored backup"
+    assert eq (open --raw ($backups | first | get name)) $shipped "backup preserves previous stock content"
+    sync-engine-files $stock_engine $root
+    assert eq (ls $ownership_dir | where {|entry| $entry.name | str ends-with ".bak" } | length) 1 "unchanged stock sync does not create another backup"
+    with-temp-dir "reseed-next-engine.XXXXXXXX" {|next_engine|
+      let next_templates = ($next_engine | path join "templates")
+      mkdir ($next_templates | path join "state" "scripts")
+      cp ($engine_root | path join "templates" "stock-shell-generator-hashes.nuon") $next_templates
+      let next_generator = ($next_templates | path join "state" "scripts" "configure-shells.nu")
+      let next_content = ((open --raw $generator) + "# next stock generator\n")
+      $next_content | save $next_generator
+      sync-engine-files $next_engine $root
+      assert eq (open --raw $generator) $next_content "future stock upgrades recognize the recorded ownership digest"
+      "# user customization\n" | save --force $generator
+      sync-engine-files $next_engine $root
+      assert eq (open --raw $generator) "# user customization\n" "user edits invalidate stock ownership"
+    }
   }
 }
 
@@ -630,7 +717,7 @@ def test-missing-packages [] {
   assert eq (pnpm-missing-packages [{spec: "@biomejs/biome" name: "@biomejs/biome" version: null}] [{name: "@biomejs/biome" version: "1.0.0"}]) [] "unpinned pnpm presence check"
   assert eq (pnpm-missing-packages [{spec: "@biomejs/biome@2.1.0" name: "@biomejs/biome" version: "2.1.0"}] [{name: "@biomejs/biome" version: "1.0.0"}] | get spec) ["@biomejs/biome@2.1.0"] "pinned pnpm mismatch"
   assert eq (node-manager-missing-packages [{spec: "@biomejs/biome" name: "@biomejs/biome" version: null commands: [biome]}] [{name: "@biomejs/biome" version: "1.0.0"}]) [] "unpinned node manager presence check"
-  assert eq (managed-command-checks pnpm [{spec: "@biomejs/biome" name: "@biomejs/biome" version: null commands: [biome]}] | get check) ["managed binary: biome"] "declared command verification"
+  assert eq (package-command-checks pnpm [{spec: "@biomejs/biome" name: "@biomejs/biome" version: null commands: [biome]}] | get check) ["package command: biome"] "declared command verification"
 }
 
 # Mise configuration validation: manager config selection, config naming,

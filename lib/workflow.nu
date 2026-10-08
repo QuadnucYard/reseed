@@ -127,10 +127,9 @@ def engine-owned-files [
   ]
 }
 
-# Copy missing engine-owned template files into an existing state repository.
-# A missing shell generator would otherwise fail desired-state validation, so
-# this runs before check-config in restore and update and on every re-runnable
-# init. Existing copies are left untouched so user customizations survive.
+# Seed missing engine-owned files and refresh recognized shipped generators.
+# Previous stock copies are backed up; custom scripts remain authoritative.
+# This runs before validation in restore/update and on re-runnable init.
 export def sync-engine-files [
   engine_root: path # Engine directory providing the template.
   state_root: path # Private state root.
@@ -140,14 +139,40 @@ export def sync-engine-files [
   for template in (engine-owned-files $engine_root) {
     let relative = ($template | path relative-to $template_root)
     let target = ($state_root | path join $relative)
-    if ($template | path exists) and not ($target | path exists) {
+    let known = (open ($engine_root | path join "templates" "stock-shell-generator-hashes.nuon"))
+    # shell/ is disposable, ignored private state. Remember the last installed
+    # stock digest so future upgrades need no growing list of historical hashes.
+    let ownership_dir = ($state_root | path join "shell" "engine-files")
+    let ownership = ($ownership_dir | path join (($relative | hash sha256) + ".sha256"))
+    let previous_hash = if ($ownership | path exists) { open --raw $ownership | str trim } else { "" }
+    let stock = if ($target | path exists) {
+      let hash = (open --raw $target | str replace --all "\r\n" "\n" | hash sha256)
+      ($hash in $known) or ($hash == $previous_hash)
+    } else { false }
+    let different = if ($target | path exists) {
+      (open --raw $target | str replace --all "\r\n" "\n") != (open --raw $template | str replace --all "\r\n" "\n")
+    } else { true }
+    if ($template | path exists) and $different and (not ($target | path exists) or $stock) {
       if $dry_run {
         info $"would seed engine-owned file to state: ($relative)"
       } else {
         mkdir ($target | path dirname)
+        if ($target | path exists) {
+          mkdir $ownership_dir
+          let backup = ($ownership_dir | path join (($target | path basename) + "." + (random uuid) + ".bak"))
+          cp $target $backup
+          info $"backed up stock generator: ($backup)"
+        }
         cp $template $target
         info $"seeded engine-owned file to state: ($relative)"
       }
+    } else if $different and ($target | path exists) {
+      warning $"Customized shell generator preserved: ($target). It must use native manager roots; review it before running its shell task."
+    }
+    if not $dry_run and ($target | path exists) and ((open --raw $target | str replace --all "\r\n" "\n") == (open --raw $template | str replace --all "\r\n" "\n")) {
+      mkdir $ownership_dir
+      let digest = (open --raw $template | str replace --all "\r\n" "\n" | hash sha256)
+      $digest | save --force $ownership
     }
   }
 }

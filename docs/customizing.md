@@ -50,9 +50,12 @@ the global config (`MISE_GLOBAL_CONFIG_FILE`); it defaults to
 `manager_config`. Reseed passes its absolute path to the generator, so
 `--state-root` and `RESEED_STATE_ROOT` remain effective. Additional
 `mise.<environment>.toml` files stay opt-in through mise environments rather
-than becoming global accidentally. The adapters activate mise last, ahead of
-the shared manager bin and the deduplicated `$CARGO_HOME/bin` rustup fallback
-(`~/.cargo/bin` by default).
+than becoming global accidentally. The adapters expose native manager executable directories without changing
+installation roots or shadowing existing PATH entries, then activate mise.
+Inherited overrides pointing to the retired Reseed root are cleared; Nushell replaces them with native defaults so startup propagation also works. Custom roots are preserved.
+The Cargo fallback follows `$CARGO_HOME/bin` (`~/.cargo/bin` by default).
+Nushell's initial mise environment is evaluated at shell startup; generated
+activation never replays a PATH snapshot captured during restoration.
 On macOS they also persist the detected Homebrew `bin` and `sbin` paths before
 looking up mise.
 
@@ -179,7 +182,7 @@ The manifests allow unversioned names for latest behavior and manager-native
 pinned specs such as `ruff==0.12.0` or `@biomejs/biome@2.1.0`. Specifiers with
 ranges, aliases, or other manager syntax are rejected during validation.
 Reconcile matches package identity and checks versions only for pinned entries;
-verification checks every declared command in the shared binary directory.
+verification checks every declared command on the normal executable PATH.
 
 Do not move bootstrap dependencies into `[tools]`. The bootstrap scripts need
 Git before they can clone or update private state, and Reseed needs Nushell,
@@ -193,9 +196,10 @@ example `yarn = "1.22.22"`.
 
 Manager execution uses the selected `manager_config` and `mise exec`, so a
 clean process does not need mise shims on its inherited `PATH`. uv, the Node
-package managers, and Cargo-binstall write commands to
-`~/.local/share/reseed/bin`; the post-chezmoi `shell_task` generates the
-supported adapters for that directory. Interactive shells get the
+package managers, and Cargo-binstall install into their native locations and
+respect custom user roots. The post-chezmoi `shell_task` exposes those normal
+executable directories without exporting installation overrides. Reseed
+updates and manual updates therefore address the same installation. Interactive shells get the
 mise-managed tools themselves through the same adapters; `shell_config`
 selects the global file and mise is activated per shell (see "Shared shell
 configuration"). The rustup fallback follows `CARGO_HOME` (defaulting to

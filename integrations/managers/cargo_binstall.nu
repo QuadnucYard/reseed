@@ -36,17 +36,15 @@ export def cargo-binstall-packages [
 # cargo-binstall arguments; --force makes update reinstall over the existing
 # binaries instead of skipping them.
 export def cargo-binstall-args [
-  install_root: path # Root whose bin directory receives installed commands.
   packages: list<string> # Crates to install.
   --update # Reinstall even when already installed.
 ]: nothing -> list<string> {
-  mut args = ["--no-confirm" "--disable-telemetry" "--root" ($install_root | into string)]
+  mut args = ["--no-confirm" "--disable-telemetry"]
   if $update { $args = ($args | append "--force") }
   $args | append $packages
 }
 
-# Run cargo-binstall through mise exec with the shared managed-tools
-# environment. A failed install warns and returns 1 so the workflow can fail
+# Run cargo-binstall through mise exec with native installation settings. A failed install warns and returns 1 so the workflow can fail
 # with a summary at the end.
 def run-binstall [
   root: path # Private state root.
@@ -55,8 +53,7 @@ def run-binstall [
   --update # Reinstall over existing binaries.
   --dry-run # Show the command without running it.
 ]: nothing -> int {
-  let install_root = (managed-bin-dir | path dirname)
-  let result = (run-mise-managed $root $config "cargo-binstall" (cargo-binstall-args $install_root $packages --update=$update) "mise is required for the configured Cargo packages" --dry-run=$dry_run --allow-failure)
+  let result = (run-mise-managed $root $config "cargo-binstall" (cargo-binstall-args $packages --update=$update) "mise is required for the configured Cargo packages" --dry-run=$dry_run --allow-failure)
   if $result.exit_code != 0 {
     warning $"cargo-binstall failed to install Cargo packages with exit code ($result.exit_code); continuing"
     return 1
@@ -104,7 +101,7 @@ def installed-cargo-packages [
     return {available: false packages: [] detail: "mise is unavailable"}
   }
   let result = (try {
-    run-mise-managed $root $config "cargo" ["install" "--list" "--root" (managed-bin-dir | path dirname | into string)] "mise is required for the configured Cargo packages" --allow-failure --capture
+    run-mise-managed $root $config "cargo" ["install" "--list"] "mise is required for the configured Cargo packages" --allow-failure --capture
   } catch {|error|
     {
       exit_code: 127

@@ -78,7 +78,7 @@ def observe-manager [
   manager_config: path # Mise config to exec through when enabled.
   --dry-run # Report what would be captured without writing.
 ]: nothing -> list<record> {
-  let environment = if $mise_enabled { managed-tool-environment } else { {} }
+  let environment = if $mise_enabled { package-manager-environment } else { {} }
   let mise = if $mise_enabled { $manager_config } else { "" }
   match $manager {
     cargo => [(observe-command $config cargo cargo ["install" "--list"] "cargo-install.txt" --mise-config=$mise --environment=$environment --dry-run=$dry_run)]

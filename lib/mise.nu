@@ -2,7 +2,7 @@
 # backend dependency rules, and running managers through mise.
 
 use core.nu [command-exists run-command]
-use managed_tools.nu [managed-tool-environment]
+use managed_tools.nu [package-manager-environment]
 
 # Resolve the directory and optional environment a mise config applies to.
 # Plain "mise.toml" has no environment; "mise.<environment>.toml" names one.
@@ -45,8 +45,8 @@ export def mise-exec-args [
   mise-args $path ((["exec" "--" $program] | append $args))
 }
 
-# Run a program through the manager mise config with the shared managed-tools
-# environment, so package managers install into the managed bin directory.
+# Run a program through the manager mise config using native package-manager locations
+# and the user's custom configuration.
 # Fails when mise is missing unless --dry-run is set.
 export def run-mise-managed [
   root: path # Private state root.
@@ -62,7 +62,7 @@ export def run-mise-managed [
     error make {msg: $requirement}
   }
   let mise_config = (mise-manager-config $root $config)
-  run-command mise (mise-exec-args $mise_config $program $args) --environment=(managed-tool-environment) --dry-run=$dry_run --allow-failure=$allow_failure --capture=$capture
+  run-command mise (mise-exec-args $mise_config $program $args) --environment=(package-manager-environment) --dry-run=$dry_run --allow-failure=$allow_failure --capture=$capture
 }
 
 # Read the [tools] table of a mise config as a record of tool name to spec.

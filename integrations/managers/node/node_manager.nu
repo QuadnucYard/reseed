@@ -149,8 +149,7 @@ def require-yarn-global [
   }
 }
 
-# Run a manager command through mise exec with the shared managed-tools
-# environment so globals install into the managed bin directory.
+# Run a manager through mise exec using its native installation settings.
 def run-node-manager [
   root: path # Private state root.
   config: record # Loaded configuration.

@@ -90,8 +90,11 @@ Kopia can optionally snapshot narrow opaque application state. The restore
 order is bootstrap preflight, native packages, mise tools, manager manifests,
 chezmoi, shell adapters, snapshots, and verification.
 
-The shared manager binary directory is `~/.local/share/reseed/bin`. It is
-ignored by the private repository. After chezmoi applies the home state, the
+Package managers use their native installation locations and respect user
+configuration. Reseed does not export installation-root overrides or maintain
+a shared package binary directory. Manual and Reseed updates address the same
+installation. Existing legacy package stores are retained until their tools
+have been reinstalled and verified in their native locations. After chezmoi applies the home state, the
 configured `shell_task` generates Nushell and Fish automatic adapters plus
 separate Bash, Zsh, and PowerShell adapters. Unmanaged profiles receive an
 idempotent loader block; chezmoi-managed profiles must source the generated
